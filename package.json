@@ -1,0 +1,25 @@
+{
+  "name": "learnbotel",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "d": "nodemon bot.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mohammadiko33/TelegramBot.git"
+  },
+  "author": "iKO-Jayko",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Mohammadiko33/TelegramBot/issues"
+  },
+  "homepage": "https://github.com/Mohammadiko33/TelegramBot#readme",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "node-telegram-bot-api": "^0.66.0",
+    "nodemon": "^3.1.10"
+  }
+}
