@@ -37,10 +37,24 @@ const feedbackSchema = new mongoose.Schema({
 });
 const Feedback = mongoose.model('Feedback', feedbackSchema);
 
+const answerLogSchema = new mongoose.Schema({
+  type: { type: String, enum: ['question', 'feedback'], required: true },
+  questionId: Number,
+  questionText: String,
+  userChatId: Number,
+  userId: Number,
+  username: String,
+  userQuestion: String, // for /question
+  userFeedback: String, // for feedback
+  adminId: String,
+  adminUsername: String,
+  adminAnswers: [String],
+  createdAt: { type: Date, default: Date.now }
+});
+const AnswerLog = mongoose.model('AnswerLog', answerLogSchema);
+
 const userStates = new Map();
-
 const adminReplies = new Map();
-
 const userChats = new Map();
 
 const cancelQuestionState = (chatId) => {
@@ -82,17 +96,90 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
     return;
   }
 
-  const welcomeMessage = `🌟 خوش آمدید به ربات پاسخگوی سوالات اسلامی!\n\n🤖 این ربات به شما کمک می‌کند تا:\n- سوالات خود درباره اسلام را بپرسید\n- به پاسخ‌های موجود دسترسی داشته باشید\n- با مطالب آموزنده آشنا شوید\n\n📝 دستورات موجود:\n/start - شروع مجدد ربات\n/quickAnswer - مشاهده لیست تمام سوالات و پاسخ‌ها\n/question - پرسیدن سوال جدید\n/cancel - لغو عملیات فعلی\n\n🔍 نمونه سوالات موجود:`;
+  const welcomeMessage = `🌟 خوش آمدید به ربات پاسخگوی سوالات اسلامی!\n\n🤖 این ربات به شما کمک می‌کند تا:\n- سوالات خود درباره اسلام را بپرسید\n- به پاسخ‌های موجود دسترسی داشته باشید\n- با مطالب آموزنده آشنا شوید\n\n📝 دستورات موجود:\n/start - شروع مجدد ربات\n/quickAnswer - مشاهده لیست تمام سوالات و پاسخ‌ها\n/question - پرسیدن سوال جدید\n/cancel - لغو عملیات فعلی\n\n🔍 نمونه سوالات رندوم:`;
 
-  await bot.sendMessage(chatId, welcomeMessage);
-
-  const sampleQuestions = questions.filter(q => [15].includes(q.id));
+  // Pick 3 random questions
+  let randomQuestions = [];
+  if (questions.length > 0) {
+    const shuffled = questions.slice().sort(() => 0.5 - Math.random());
+    randomQuestions = shuffled.slice(0, 3);
+  }
   let questionsMessage = '';
-  sampleQuestions.forEach(q => {
-    questionsMessage += `❓ ${q.question}\n`;
+  randomQuestions.forEach(q => {
+    questionsMessage += `❓ <a href=\"https://t.me/questions_islam/${q.id}\">${q.question}</a>\n`;
   });
+  const fullMessage = `${welcomeMessage}\n\n${questionsMessage || '❗️ نمونه سوال در حال حاضر موجود نیست.'}`;
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: 'سوالاتی که قبلا پاسخ داده شده', callback_data: 'show_quick_answer' },
+          { text: 'پرسیدن سوال جدید', callback_data: 'ask_new_question' }
+        ]
+      ]
+    },
+    parse_mode: 'HTML',
+    disable_web_page_preview: false
+  };
+  await bot.sendMessage(chatId, fullMessage, keyboard);
+});
 
-  await bot.sendMessage(chatId, questionsMessage || '❗️ نمونه سوال در حال حاضر موجود نیست.');
+// Handle inline keyboard actions for /start
+bot.on('callback_query', async (callbackQuery) => {
+  const data = callbackQuery.data || '';
+  const chatId = callbackQuery.message.chat.id;
+
+  if (data === 'show_quick_answer') {
+    // Simulate /quickAnswer
+    let combined = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n';
+    if (!botUsername) {
+      try {
+        const info = await bot.getMe();
+        botUsername = info.username;
+      } catch (e) {
+        console.error('Failed to get bot username for deep links:', e && e.message);
+      }
+    }
+    questions.forEach((q, idx) => {
+      combined += `${idx + 1}. <a href=\"https://t.me/questions_islam/${q.id}\">${q.question}</a>\n`;
+      combined += `<a href=\"${q.answerSite}\">پاسخ در سایت</a>\n`;
+      const usernameForLink = botUsername ? botUsername : '<your_bot_username>';
+      const deepLink = `https://t.me/${usernameForLink}?start=feedback_${q.id}`;
+      combined += `<a href=\"${deepLink}\">ارسال بازخورد</a>\n\n`;
+    });
+    await bot.sendMessage(chatId, combined, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: false
+    });
+    try {
+      await bot.sendSticker(chatId, 'CAACAgQAAxkBAAIDaWRqhP4v7h8AAUtplwrqAAHMXt5c3wACPxAAAqbxcR4V0yHjRsIKVy8E');
+    } catch (e) {
+      console.error('Failed to send sticker:', e && e.message);
+    }
+    await bot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  if (data === 'ask_new_question') {
+    // Simulate /question
+    const timeout = setTimeout(() => {
+      if (userStates.has(chatId)) {
+        bot.sendMessage(chatId, '⏳ زمان پرسیدن سوال به پایان رسید. لطفاً دوباره تلاش کنید.');
+        cancelQuestionState(chatId);
+      }
+    }, 5 * 60 * 1000); // 5 minutes
+
+    userStates.set(chatId, {
+      state: 'waiting_for_question',
+      userId: callbackQuery.from.id,
+      username: callbackQuery.from.username || 'بدون نام کاربری',
+      timeout
+    });
+
+    await bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.');
+    await bot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  // ...existing code for other callback_query handlers...
 });
 
 bot.onText(/\/quickAnswer/, async (msg) => {
@@ -212,13 +299,22 @@ bot.on('message', async (msg) => {
 
     if (userState.state === 'waiting_for_question') {
       const usernameDisplay = userState.username && userState.username !== 'بدون نام کاربری' ? `@${userState.username}` : '';
-      const questionMessage = `📩 یک سؤال جدید از کاربر ${usernameDisplay}\n\n${text}\n\nلینک پست: https://t.me/questions_islam/ask\nchatId:${chatId}`;
+      // Do NOT include post link for /question flow
+      const questionMessage = `📩 یک سؤال جدید از کاربر ${usernameDisplay}\n\n${text}\n\nchatId:${chatId}`;
       const key = userState.username && userState.username !== 'بدون نام کاربری' ? userState.username : `id_${chatId}`;
       userChats.set(key, chatId);
       adminReplies.set(key, []);
+      await AnswerLog.create({
+        type: 'question',
+        userChatId: chatId,
+        userId: userState.userId,
+        username: userState.username,
+        userQuestion: text,
+        createdAt: new Date()
+      });
       await bot.sendMessage(adminId, questionMessage);
 
-  await bot.sendMessage(chatId, '✅ سوال شما دریافت شد و به زودی پاسخ داده خواهد شد.');
+      await bot.sendMessage(chatId, '✅ سوال شما دریافت شد و به زودی پاسخ داده خواهد شد.');
 
       cancelQuestionState(chatId);
       return;
@@ -260,6 +356,7 @@ bot.on('callback_query', async (callbackQuery) => {
 
     await bot.sendMessage(adminId, feedbackMsg);
     await bot.answerCallbackQuery(callbackQuery.id, { text: 'بازخورد برای مدیریت ارسال شد.' });
+    return;
   }
 });
 
@@ -279,6 +376,18 @@ bot.on('message', async (msg) => {
         for (const r of fb.adminReplies) {
           await bot.sendMessage(fb.userChatId, r);
         }
+        await AnswerLog.create({
+          type: 'feedback',
+          questionId: fb.questionId,
+          questionText: fb.questionText,
+          userChatId: fb.userChatId,
+          userId: fb.userId,
+          username: fb.username,
+          userFeedback: fb.userFeedback,
+          adminId: adminId,
+          adminAnswers: fb.adminReplies,
+          createdAt: new Date()
+        });
         fb.status = 'completed';
         fb.adminReplies = [];
         await fb.save();
@@ -315,6 +424,29 @@ bot.on('message', async (msg) => {
       await bot.sendMessage(targetChatId, 'پاسخ ادمین به بازخورد شما:');
       for (const r of replies) {
         await bot.sendMessage(targetChatId, r);
+      }
+      const userKey = keyFound;
+      const userQuestionLog = await AnswerLog.findOne({
+        type: 'question',
+        $or: [
+          { userChatId: targetChatId },
+          { username: userKey && !userKey.startsWith('id_') ? userKey : undefined }
+        ],
+        adminAnswers: { $exists: false }
+      }).sort({ createdAt: -1 });
+      if (userQuestionLog) {
+        userQuestionLog.adminId = adminId;
+        userQuestionLog.adminAnswers = replies;
+        await userQuestionLog.save();
+      } else {
+        await AnswerLog.create({
+          type: 'question',
+          userChatId: targetChatId,
+          username: userKey && !userKey.startsWith('id_') ? userKey : undefined,
+          adminId: adminId,
+          adminAnswers: replies,
+          createdAt: new Date()
+        });
       }
       if (keyFound) adminReplies.delete(keyFound);
       userChats.delete(keyFound);
