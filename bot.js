@@ -1,192 +1,206 @@
-const TelegramBot = require("node-telegram-bot-api");
-require("dotenv").config();
-const db = require("./db");
+require('dotenv').config();
+const telegramBot = require('node-telegram-bot-api');
+const token = process.env.TOKEN || null;
+const adminId = process.env.ADMIN_ID;
+const questions = require('./db');
 
-const token = process.env.TOKEN;
-const ADMIN_ID = process.env.ADMIN_ID;
+const bot = new telegramBot(token, { polling: true });
 
-if (!token || !ADMIN_ID) {
-  console.error("❌ لطفاً TOKEN و ADMIN_ID را در فایل .env تنظیم کنید");
-  process.exit(1);
-}
-
-const bot = new TelegramBot(token, { polling: true });
-
-// وضعیت کاربران و پاسخ‌های ادمین
+// Store user states
 const userStates = new Map();
-const adminReplyStates = new Map(); // { adminId: { targetUserId, messages: [] } }
 
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  const message = `� سلام! به ربات پرسش و پاسخ خوش آمدید.\n\n�📘 این ربات برای پرسیدن سؤالات شما طراحی شده است.\nشما می‌توانید سؤال بپرسید و پاسخ آن را بعداً از همین‌جا دریافت کنید.\n\n🧭 دستورات در دسترس:\n/start — شروع و نمایش توضیحات\n/question — پرسیدن سؤال جدید\n/quickAnswer — نمایش سؤالات و پاسخ‌های آماده\n/cancel — لغو پرسیدن سؤال\n\n📌 نمونه سؤالات آماده:`;
+// Store admin replies for each user
+const adminReplies = new Map();
 
-  const sampleQuestions = (Array.isArray(db) ? db : [])
-    .filter((item) => [15, 32, 44].includes(item.id))
-    .map(
-      (item) => `• <a href="https://t.me/questions_islam/${item.id}">${item.question}</a>`
-    )
-    .join("\n");
-
-  bot.sendMessage(chatId, message + "\n" + sampleQuestions, {
-    parse_mode: "HTML",
-    disable_web_page_preview: true,
-  });
-});
-
-bot.onText(/\/quickAnswer/, (msg) => {
-  const chatId = msg.chat.id;
-  if (!Array.isArray(db) || !db.length) {
-    bot.sendMessage(chatId, "هیچ پاسخ آماده‌ای وجود ندارد.");
-    return;
+// Function to cancel user's question state
+const cancelQuestionState = (chatId) => {
+  if (userStates.has(chatId)) {
+    clearTimeout(userStates.get(chatId).timeout);
+    userStates.delete(chatId);
+    return true;
   }
+  return false;
+};
 
-  let message = "📚 پاسخ‌های آماده:\n\n";
-  db.forEach((item) => {
-    message += `🔹 <a href="https://t.me/questions_islam/${item.id}">${item.question}</a>\n`;
-    message += `🔗 <a href="${item.answerSite}">مشاهده پاسخ در سایت</a>\n\n`;
-  });
+// Start command handler
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  
+  // Welcome message with bot description and commands
+  const welcomeMessage = `🌟 خوش آمدید به ربات پاسخگوی سوالات اسلامی!
 
-  bot.sendMessage(chatId, message, {
-    parse_mode: "HTML",
-    disable_web_page_preview: true,
+🤖 این ربات به شما کمک می‌کند تا:
+- سوالات خود درباره اسلام را بپرسید
+- به پاسخ‌های موجود دسترسی داشته باشید
+- با مطالب آموزنده آشنا شوید
+
+📝 دستورات موجود:
+/start - شروع مجدد ربات
+/quickAnswer - مشاهده لیست تمام سوالات و پاسخ‌ها
+/question - پرسیدن سوال جدید
+/cancel - لغو عملیات فعلی
+
+🔍 نمونه سوالات موجود:`;
+
+  await bot.sendMessage(chatId, welcomeMessage);
+
+  // Show 3 sample questions (IDs 15, 32, 44)
+  const sampleQuestions = questions.filter(q => [15].includes(q.id));
+  let questionsMessage = '';
+  sampleQuestions.forEach(q => {
+    questionsMessage += `❓ ${q.question}\n`;
   });
+  
+  await bot.sendMessage(chatId, questionsMessage || '❗️ نمونه سوال در حال حاضر موجود نیست.');
 });
 
+// Quick Answer command handler
+bot.onText(/\/quickAnswer/, async (msg) => {
+  const chatId = msg.chat.id;
+  
+  await bot.sendMessage(chatId, '📚 لیست تمام سوالات و پاسخ‌ها:');
+  
+  for (const q of questions) {
+    const message = `<a href="https://t.me/questions_islam/${q.id}">${q.question}</a>\n\n🔍 پاسخ در سایت:\n${q.answerSite}`;
+    await bot.sendMessage(chatId, message, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: false
+    });
+  }
+  
+  await bot.sendMessage(chatId, '📖 برای مطالعه پاسخ‌ها روی لینک‌ها کلیک کنید!');
+});
+
+// Question command handler
 bot.onText(/\/question/, (msg) => {
-  const userId = msg.chat.id;
-  userStates.set(userId, { askingQuestion: true });
-
-  bot.sendMessage(
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const username = msg.from.username || 'بدون نام کاربری';
+  
+  // Set user state for asking question
+  const timeout = setTimeout(() => {
+    if (userStates.has(chatId)) {
+      bot.sendMessage(chatId, '⏳ زمان پرسیدن سوال به پایان رسید. لطفاً دوباره تلاش کنید.');
+      cancelQuestionState(chatId);
+    }
+  }, 5 * 60 * 1000); // 5 minutes timeout
+  
+  userStates.set(chatId, {
+    state: 'waiting_for_question',
     userId,
-    "🟢 لطفاً سؤال خود را بنویسید.\n(برای لغو بنویسید /cancel)"
-  );
-
-  setTimeout(() => {
-    const state = userStates.get(userId);
-    if (state && state.askingQuestion) {
-      userStates.set(userId, { askingQuestion: false });
-      bot.sendMessage(userId, "⌛ زمان پرسش به پایان رسید. درخواست لغو شد.");
-    }
-  }, 5 * 60 * 1000);
+    username,
+    timeout
+  });
+  
+  bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.');
 });
 
+// Cancel command handler
 bot.onText(/\/cancel/, (msg) => {
-  const userId = msg.chat.id;
-  const state = userStates.get(userId);
-
-  if (state && state.askingQuestion) {
-    userStates.set(userId, { askingQuestion: false });
-    bot.sendMessage(userId, "❎ پرسیدن سؤال لغو شد.");
+  const chatId = msg.chat.id;
+  
+  if (cancelQuestionState(chatId)) {
+    bot.sendMessage(chatId, '❌ عملیات لغو شد.');
   } else {
-    bot.sendMessage(userId, "⚠️ شما در حالت پرسش سؤال نیستید.");
+    bot.sendMessage(chatId, '❗️ عملیاتی برای لغو کردن وجود ندارد.');
   }
 });
 
-bot.on("message", async (msg) => {
+// Message handler
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
   const text = msg.text;
-  const userId = msg.chat.id;
-
-  if (!text || text.startsWith("/")) return;
-
-  // ✅ اگر کاربر سؤال می‌پرسد
-  const state = userStates.get(userId);
-  if (state && state.askingQuestion) {
-    userStates.set(userId, { askingQuestion: false });
-
-    // ارسال/فوروارد پیام کاربر به ادمین
-    const username = msg.from.username
-      ? `@${msg.from.username}`
-      : msg.from.first_name || "کاربر ناشناس";
-
-    try {
-      await bot.forwardMessage(ADMIN_ID, userId, msg.message_id);
-      await bot.sendMessage(
-        ADMIN_ID,
-        `📩 یک سؤال جدید از کاربر ${username} دریافت شد. برای پاسخ‌دهی به پیام فرستاده‌شده پاسخ دهید (reply) و سپس «پایان» را ارسال کنید.`
-      );
-    } catch (err) {
-      await bot.sendMessage(
-        ADMIN_ID,
-        `📩 یک سؤال جدید از کاربر ${username}:\n\n${text}`
-      );
-    }
-
-    bot.sendMessage(userId, "✅ سؤال شما ارسال شد. پس از بررسی پاسخ داده می‌شود.");
-    return;
-  }
-
-  if (userId.toString() === ADMIN_ID.toString()) {
-    const adminState = adminReplyStates.get(userId);
-
-    if (adminState) {
-      if (text.trim().toLowerCase() === "پایان") {
-        const { targetUserId, messages } = adminState;
-
-        if (!messages.length) {
-          bot.sendMessage(userId, "⚠️ پاسخی برای ارسال وجود ندارد.");
-          adminReplyStates.delete(userId);
-          return;
-        }
-
-        for (const replyText of messages) {
-          await bot.sendMessage(targetUserId, replyText);
-        }
-
-        await bot.sendMessage(userId, "✅ پاسخ‌ها برای کاربر ارسال شدند.");
-        adminReplyStates.delete(userId);
-        return;
-      }
-
-      adminState.messages.push(text);
-      adminReplyStates.set(userId, adminState);
-      bot.sendMessage(userId, "📝 پاسخ ذخیره شد (با نوشتن «پایان» ارسال می‌شود).");
+  
+  // Ignore commands
+  if (!text || text.startsWith('/')) return;
+  
+  // Check if user is in question state
+  if (userStates.has(chatId)) {
+    const userState = userStates.get(chatId);
+    
+    if (userState.state === 'waiting_for_question') {
+      // Forward question to admin
+      const questionMessage = `📩 یک سؤال جدید از کاربر @${userState.username}:\n\n${text}`;
+      await bot.sendMessage(adminId, questionMessage);
+      
+      await bot.sendMessage(chatId, '✅ سوال شما دریافت شد و به زودی پاسخ داده خواهد شد.');
+      
+      // Initialize admin replies for this user
+      adminReplies.set(userState.username, []);
+      
+      cancelQuestionState(chatId);
       return;
     }
   }
-
-  const validTexts = [
-    "سوال دارم",
-    "یک تضاد پیدا کردم تو اسلام",
-    "یک مشکل پیدا کردم تو اسلام",
+  
+  // Handle specific text messages
+  const validQuestionPhrases = [
+    'سوال دارم',
+    'یک تضاد پیدا کردم تو اسلام',
+    'یک مشکل پیدا کردم تو اسلام'
   ];
-  if (validTexts.includes(text.trim())) {
+  
+  if (validQuestionPhrases.includes(text)) {
     bot.sendMessage(
-      userId,
-      "برای شروع پرسیدن سؤال از دستور /question استفاده کنید."
+      chatId,
+      'برای پرسیدن سوال، لطفاً از دستور /question استفاده کنید یا یکی از عبارات زیر را بنویسید:\n- سوال دارم\n- یک تضاد پیدا کردم تو اسلام\n- یک مشکل پیدا کردم تو اسلام'
     );
   } else {
     bot.sendMessage(
-      userId,
-      "اگر می‌خواهید سؤال بپرسید از دستور /question استفاده کنید."
+      chatId,
+      'اگر می‌خواهید سوالی بپرسید، لطفاً از دستور /question استفاده کنید یا یکی از عبارات زیر را بنویسید:\n- سوال دارم\n- یک تضاد پیدا کردم تو اسلام\n- یک مشکل پیدا کردم تو اسلام'
     );
   }
 });
 
-bot.on("message", (msg) => {
-  const userId = msg.chat.id;
-
-  if (userId.toString() !== ADMIN_ID.toString()) return;
-  if (!msg.reply_to_message) return;
-
-  const forwardFrom = msg.reply_to_message.forward_from;
-  if (!forwardFrom || !forwardFrom.id) {
-    bot.sendMessage(
-      userId,
-      "⚠️ کاربر مقصد پیدا نشد. لطفاً به پیام فوروارد شده‌ی کاربر پاسخ دهید (reply) تا حالت پاسخ‌دهی فعال شود."
-    );
-    return;
+// Reply handler for admin
+bot.on('message', async (msg) => {
+  if (msg.from.id.toString() !== adminId || !msg.reply_to_message) return;
+  
+  const replyText = msg.text;
+  const originalMessage = msg.reply_to_message.text;
+  
+  // Check if the replied message is a question from a user
+  if (originalMessage && originalMessage.startsWith('📩 یک سؤال جدید از کاربر')) {
+    // Extract username from the original question
+    const usernameMatch = originalMessage.match(/@(\w+):/);
+    if (!usernameMatch) return;
+    
+    const username = usernameMatch[1];
+    
+    if (replyText.toLowerCase() === 'پایان') {
+      // Get all collected replies for this user
+      const replies = adminReplies.get(username) || [];
+      
+      // Find user's chat ID from stored states
+      let userChatId;
+      for (const [chatId, state] of userStates.entries()) {
+        if (state.username === username) {
+          userChatId = chatId;
+          break;
+        }
+      }
+      
+      if (userChatId && replies.length > 0) {
+        // Send all replies to the user
+        for (const reply of replies) {
+          await bot.sendMessage(userChatId, reply);
+        }
+        
+        // Clear stored replies
+        adminReplies.delete(username);
+      }
+      
+      await bot.sendMessage(msg.chat.id, '✅ پاسخ‌ها به کاربر ارسال شد.');
+    } else {
+      // Store the reply
+      const userReplies = adminReplies.get(username) || [];
+      userReplies.push(replyText);
+      adminReplies.set(username, userReplies);
+      
+      await bot.sendMessage(msg.chat.id, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
+    }
   }
-
-  const targetUserId = forwardFrom.id;
-  const targetUsername = forwardFrom.username ? `@${forwardFrom.username}` : (forwardFrom.first_name || 'کاربر');
-
-  bot.sendMessage(
-    userId,
-    `✏️ حالت پاسخ‌دهی به ${targetUsername} فعال شد.\nهر پیام شما ذخیره می‌شود تا وقتی بنویسید «پایان».`
-  );
-
-  adminReplyStates.set(userId, {
-    targetUserId,
-    messages: [],
-  });
 });
+
+console.log('Bot is running...');
