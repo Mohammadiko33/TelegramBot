@@ -175,7 +175,9 @@ bot.on('callback_query', async (callbackQuery) => {
       timeout
     });
 
-    await bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.');
+    if (chatId.toString() !== adminId.toString()) {
+      await bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.');
+    }
     await bot.answerCallbackQuery(callbackQuery.id);
     return;
   }
@@ -233,7 +235,9 @@ bot.onText(/\/question/, (msg) => {
     timeout
   });
 
-  bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.');
+  if (chatId.toString() !== adminId.toString()) {
+    bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.');
+  }
 });
 
 bot.onText(/\/cancel/, (msg) => {
@@ -365,10 +369,11 @@ bot.on('message', async (msg) => {
 
   const original = msg.reply_to_message.text || '';
   const feedbackMatch = original.match(/FeedbackID:([0-9a-fA-F]{24})/);
+  const text = msg.text || '';
+
+  // Feedback flow (unchanged)
   if (feedbackMatch) {
     const fbId = feedbackMatch[1];
-    const text = msg.text || '';
-
     if (text.trim().toLowerCase() === 'پایان') {
       const fb = await Feedback.findById(fbId);
       if (fb && fb.adminReplies && fb.adminReplies.length > 0) {
@@ -397,80 +402,55 @@ bot.on('message', async (msg) => {
       }
       return;
     }
-
     await Feedback.findByIdAndUpdate(fbId, { $push: { adminReplies: text }, $set: { status: 'waiting_admin' } });
     await bot.sendMessage(adminId, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
     return;
   }
-  
-  if (!original.includes('chatId:')) return;
-  const match = original.match(/chatId:(\d+)/);
-  if (!match) return;
-  const targetChatId = Number(match[1]);
 
-  const text = msg.text || '';
+  // Question answer flow (reply to question message)
+  // Try to extract chatId and question from the original message
+  const chatIdMatch = original.match(/chatId:(\d+)/);
+  const questionMatch = original.match(/یک سؤال جدید از کاربر.*\n+([\s\S]*?)\n+chatId:/);
+  if (!chatIdMatch) return;
+  const targetChatId = Number(chatIdMatch[1]);
+  const userQuestionText = questionMatch ? questionMatch[1].trim() : '';
+
+  // Use a per-message reply buffer for this question
+  // We'll use a map: adminQuestionReplyBuffer: key = original messageId, value = array of replies
+  if (!global.adminQuestionReplyBuffer) global.adminQuestionReplyBuffer = new Map();
+  const bufferKey = msg.reply_to_message.message_id;
+  if (!global.adminQuestionReplyBuffer.has(bufferKey)) global.adminQuestionReplyBuffer.set(bufferKey, []);
 
   if (text.trim().toLowerCase() === 'پایان') {
-    let keyFound = null;
-    for (const [k, v] of userChats.entries()) {
-      if (v === targetChatId) {
-        keyFound = k;
-        break;
-      }
-    }
-
-    const replies = keyFound ? (adminReplies.get(keyFound) || []) : [];
+    const replies = global.adminQuestionReplyBuffer.get(bufferKey) || [];
     if (replies.length > 0) {
-      await bot.sendMessage(targetChatId, 'پاسخ ادمین به بازخورد شما:');
+      // Send header with part of the user's question for clarity
+      let header = 'پاسخ ادمین به سوال شما';
+      if (userQuestionText) {
+        header += ` (${userQuestionText.slice(0, 40)}...)`;
+      }
+      await bot.sendMessage(targetChatId, header);
       for (const r of replies) {
         await bot.sendMessage(targetChatId, r);
       }
-      const userKey = keyFound;
-      const userQuestionLog = await AnswerLog.findOne({
+      // Log the answer
+      await AnswerLog.create({
         type: 'question',
-        $or: [
-          { userChatId: targetChatId },
-          { username: userKey && !userKey.startsWith('id_') ? userKey : undefined }
-        ],
-        adminAnswers: { $exists: false }
-      }).sort({ createdAt: -1 });
-      if (userQuestionLog) {
-        userQuestionLog.adminId = adminId;
-        userQuestionLog.adminAnswers = replies;
-        await userQuestionLog.save();
-      } else {
-        await AnswerLog.create({
-          type: 'question',
-          userChatId: targetChatId,
-          username: userKey && !userKey.startsWith('id_') ? userKey : undefined,
-          adminId: adminId,
-          adminAnswers: replies,
-          createdAt: new Date()
-        });
-      }
-      if (keyFound) adminReplies.delete(keyFound);
-      userChats.delete(keyFound);
+        userChatId: targetChatId,
+        userQuestion: userQuestionText,
+        adminId: adminId,
+        adminAnswers: replies,
+        createdAt: new Date()
+      });
+      global.adminQuestionReplyBuffer.delete(bufferKey);
+    } else {
+      await bot.sendMessage(adminId, '⚠️ هیچ پاسخی ثبت نشده است.');
     }
-
     await bot.sendMessage(adminId, '✅ پاسخ‌ها به کاربر ارسال شد.');
     return;
   }
 
-  let key = null;
-  for (const [k, v] of userChats.entries()) {
-    if (v === targetChatId) {
-      key = k;
-      break;
-    }
-  }
-  if (!key) {
-    key = `id_${targetChatId}`;
-    userChats.set(key, targetChatId);
-  }
-
-  const arr = adminReplies.get(key) || [];
-  arr.push(text);
-  adminReplies.set(key, arr);
-
+  // Accumulate admin replies for this question
+  global.adminQuestionReplyBuffer.get(bufferKey).push(text);
   await bot.sendMessage(adminId, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
 });
