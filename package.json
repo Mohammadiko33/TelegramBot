@@ -5,7 +5,7 @@
   "main": "app.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "d": "nodemon bot.js"
+    "bot": "nodemon bot.js"
   },
   "repository": {
     "type": "git",
@@ -19,6 +19,7 @@
   "homepage": "https://github.com/Mohammadiko33/TelegramBot#readme",
   "dependencies": {
     "dotenv": "^17.2.3",
+    "mongoose": "^8.19.1",
     "node-telegram-bot-api": "^0.66.0",
     "nodemon": "^3.1.10"
   }
