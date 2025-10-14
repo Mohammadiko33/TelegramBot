@@ -316,10 +316,13 @@ bot.on('message', async (msg) => {
       // send collected admin replies to user and mark completed
       const fb = await Feedback.findById(fbId);
       if (fb && fb.adminReplies && fb.adminReplies.length > 0) {
+        // send a header first
+        await bot.sendMessage(fb.userChatId, 'پاسخ ادمین به بازخورد شما:');
         for (const r of fb.adminReplies) {
           await bot.sendMessage(fb.userChatId, r);
         }
         fb.status = 'completed';
+        fb.adminReplies = [];
         await fb.save();
         await bot.sendMessage(adminId, '✅ پاسخ‌ها به کاربر ارسال شد.');
       } else {
@@ -357,6 +360,7 @@ bot.on('message', async (msg) => {
 
     const replies = keyFound ? (adminReplies.get(keyFound) || []) : [];
     if (replies.length > 0) {
+      await bot.sendMessage(targetChatId, 'پاسخ ادمین به بازخورد شما:');
       for (const r of replies) {
         await bot.sendMessage(targetChatId, r);
       }
