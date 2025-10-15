@@ -98,7 +98,6 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
 
   const welcomeMessage = `🌟 خوش آمدید به ربات پاسخگوی سوالات اسلامی!\n\n🤖 این ربات به شما کمک می‌کند تا:\n- سوالات خود درباره اسلام را بپرسید\n- به پاسخ‌های موجود دسترسی داشته باشید\n- با مطالب آموزنده آشنا شوید\n\n📝 دستورات موجود:\n/start - شروع مجدد ربات\n/quickAnswer - مشاهده لیست تمام سوالات و پاسخ‌ها\n/question - پرسیدن سوال جدید\n/cancel - لغو عملیات فعلی\n\n🔍 نمونه سوالات رندوم:`;
 
-  // Pick 3 random questions
   let randomQuestions = [];
   if (questions.length > 0) {
     const shuffled = questions.slice().sort(() => 0.5 - Math.random());
@@ -124,13 +123,11 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   await bot.sendMessage(chatId, fullMessage, keyboard);
 });
 
-// Handle inline keyboard actions for /start
 bot.on('callback_query', async (callbackQuery) => {
   const data = callbackQuery.data || '';
   const chatId = callbackQuery.message.chat.id;
 
   if (data === 'show_quick_answer') {
-    // Simulate /quickAnswer
     let combined = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n';
     if (!botUsername) {
       try {
@@ -160,7 +157,12 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
   }
   if (data === 'ask_new_question') {
-    // Simulate /question
+    // Return immediately if user is admin
+    if (chatId.toString() === adminId.toString()) {
+      await bot.answerCallbackQuery(callbackQuery.id);
+      return;
+    }
+
     const timeout = setTimeout(() => {
       if (userStates.has(chatId)) {
         bot.sendMessage(chatId, '⏳ زمان پرسیدن سوال به پایان رسید. لطفاً دوباره تلاش کنید.');
@@ -181,7 +183,6 @@ bot.on('callback_query', async (callbackQuery) => {
     await bot.answerCallbackQuery(callbackQuery.id);
     return;
   }
-  // ...existing code for other callback_query handlers...
 });
 
 bot.onText(/\/quickAnswer/, async (msg) => {
@@ -218,6 +219,12 @@ bot.onText(/\/quickAnswer/, async (msg) => {
 
 bot.onText(/\/question/, (msg) => {
   const chatId = msg.chat.id;
+  
+  // Immediately return if message is from admin
+  if (chatId.toString() === adminId.toString()) {
+    return;
+  }
+
   const userId = msg.from.id;
   const username = msg.from.username || 'بدون نام کاربری';
 
@@ -274,6 +281,11 @@ bot.on('message', async (msg) => {
       لطفا از کلمات شرم آور استفاده نکنید 
       بیایید محترمانه حرف بزنیم تا گفت وگو خوشایندتر بشه 
       `)
+    return;
+  }
+
+  // Check if message is from admin and block question receiving
+  if (chatId.toString() === adminId.toString()) {
     return;
   }
 
@@ -370,8 +382,13 @@ bot.on('message', async (msg) => {
   const original = msg.reply_to_message.text || '';
   const feedbackMatch = original.match(/FeedbackID:([0-9a-fA-F]{24})/);
   const text = msg.text || '';
+  
+  // Check if this message is an admin reply to a user question
+  const isQuestionReply = original.match(/^📩 یک سؤال جدید از کاربر/);
+  
+  // If not a feedback or question reply, exit early
+  if (!feedbackMatch && !isQuestionReply) return;
 
-  // Feedback flow (unchanged)
   if (feedbackMatch) {
     const fbId = feedbackMatch[1];
     if (text.trim().toLowerCase() === 'پایان') {
@@ -407,50 +424,72 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // Question answer flow (reply to question message)
-  // Try to extract chatId and question from the original message
+  // Handle question replies from admin
   const chatIdMatch = original.match(/chatId:(\d+)/);
   const questionMatch = original.match(/یک سؤال جدید از کاربر.*\n+([\s\S]*?)\n+chatId:/);
   if (!chatIdMatch) return;
+  
   const targetChatId = Number(chatIdMatch[1]);
   const userQuestionText = questionMatch ? questionMatch[1].trim() : '';
 
-  // Use a per-message reply buffer for this question
-  // We'll use a map: adminQuestionReplyBuffer: key = original messageId, value = array of replies
+  // Skip if somehow the target is admin (shouldn't happen)
+  if (targetChatId.toString() === adminId) return;
+
+  // Initialize or get the reply buffer for this question
   if (!global.adminQuestionReplyBuffer) global.adminQuestionReplyBuffer = new Map();
   const bufferKey = msg.reply_to_message.message_id;
-  if (!global.adminQuestionReplyBuffer.has(bufferKey)) global.adminQuestionReplyBuffer.set(bufferKey, []);
+  if (!global.adminQuestionReplyBuffer.has(bufferKey)) {
+    global.adminQuestionReplyBuffer.set(bufferKey, {
+      replies: [],
+      targetChatId,
+      userQuestion: userQuestionText
+    });
+  }
 
   if (text.trim().toLowerCase() === 'پایان') {
-    const replies = global.adminQuestionReplyBuffer.get(bufferKey) || [];
+    const questionData = global.adminQuestionReplyBuffer.get(bufferKey);
+    if (!questionData) {
+      await bot.sendMessage(adminId, '⚠️ پاسخی برای این سوال یافت نشد.');
+      return;
+    }
+
+    const { replies, targetChatId, userQuestion } = questionData;
+
     if (replies.length > 0) {
-      // Send header with part of the user's question for clarity
       let header = 'پاسخ ادمین به سوال شما';
-      if (userQuestionText) {
-        header += ` (${userQuestionText.slice(0, 40)}...)`;
+      if (userQuestion) {
+        header += ` (${userQuestion.slice(0, 40)}...)`;
       }
       await bot.sendMessage(targetChatId, header);
+      
+      // Send all replies to user
       for (const r of replies) {
         await bot.sendMessage(targetChatId, r);
       }
+
       // Log the answer
       await AnswerLog.create({
         type: 'question',
         userChatId: targetChatId,
-        userQuestion: userQuestionText,
+        userQuestion: userQuestion,
         adminId: adminId,
         adminAnswers: replies,
         createdAt: new Date()
       });
+
+      // Clean up the buffer
       global.adminQuestionReplyBuffer.delete(bufferKey);
+      await bot.sendMessage(adminId, '✅ پاسخ‌ها به کاربر ارسال شد.');
     } else {
       await bot.sendMessage(adminId, '⚠️ هیچ پاسخی ثبت نشده است.');
     }
-    await bot.sendMessage(adminId, '✅ پاسخ‌ها به کاربر ارسال شد.');
     return;
   }
 
-  // Accumulate admin replies for this question
-  global.adminQuestionReplyBuffer.get(bufferKey).push(text);
+  // Store the reply in the buffer
+  const questionData = global.adminQuestionReplyBuffer.get(bufferKey);
+  questionData.replies.push(text);
+  global.adminQuestionReplyBuffer.set(bufferKey, questionData);
+  
   await bot.sendMessage(adminId, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
 });
