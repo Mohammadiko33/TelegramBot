@@ -2,9 +2,32 @@ require('dotenv').config();
 const telegramBot = require('node-telegram-bot-api');
 const token = process.env.TOKEN || null;
 const adminId = process.env.ADMIN_ID;
-const questions = require('./db');
+const defaultQuestions = require('./db');
+
+let questions = [];
+
+const loadQuestions = async () => {
+  try {
+    questions = await Question.find().sort({ id: 1 });
+    
+    if (questions.length === 0) {
+      console.log('No questions found in MongoDB, loading from default data...');
+      await Question.insertMany(defaultQuestions);
+      questions = await Question.find().sort({ id: 1 });
+      console.log(`Loaded ${questions.length} questions from default data into MongoDB`);
+    } else {
+      console.log(`Loaded ${questions.length} questions from MongoDB`);
+    }
+  } catch (error) {
+    console.error('Error loading questions:', error);
+    questions = defaultQuestions;
+    console.log('Using default questions from db.js');
+  }
+};
 
 const bot = new telegramBot(token, { polling: true });
+
+loadQuestions().catch(console.error);
 
 let botUsername = process.env.BOT_USERNAME || null;
 if (!botUsername) {
@@ -23,6 +46,14 @@ mongoose.connect('mongodb://127.0.0.1:27017/questionIslamBot', {
   useNewUrlParser: true,
   useUnifiedTopology: true
 }).then(() => console.log('Connected to MongoDB questionIslamBot')).catch(err => console.error('MongoDB connect error:', err && err.message));
+
+const questionSchema = new mongoose.Schema({
+  id: { type: Number, required: true, unique: true },
+  question: { type: String, required: true },
+  answerSite: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+const Question = mongoose.model('Question', questionSchema);
 
 const feedbackSchema = new mongoose.Schema({
   questionId: Number,
@@ -188,7 +219,6 @@ bot.on('callback_query', async (callbackQuery) => {
 bot.onText(/\/quickAnswer/, async (msg) => {
   const chatId = msg.chat.id;
 
-  let combined = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n';
   if (!botUsername) {
     try {
       const info = await bot.getMe();
@@ -198,17 +228,49 @@ bot.onText(/\/quickAnswer/, async (msg) => {
     }
   }
 
-  questions.forEach((q, idx) => {
-    combined += `${idx + 1}. <a href="https://t.me/questions_islam/${q.id}">${q.question}</a>\n`;
-    combined += `<a href="${q.answerSite}">پاسخ در سایت</a>\n`;
+  const ITEMS_PER_MESSAGE = 15;
+  const chunks = [];
+  let currentChunk = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n';
+  let itemCounter = 0;
+
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    const questionText = `${i + 1}. <a href="https://t.me/questions_islam/${q.id}">${q.question}</a>\n`;
+    const answerText = `<a href="${q.answerSite}">پاسخ در سایت</a>\n`;
     const usernameForLink = botUsername ? botUsername : '<your_bot_username>';
-      const deepLink = `https://t.me/${usernameForLink}?start=feedback_${q.id}`;
-      combined += `<a href="${deepLink}">ارسال بازخورد</a>\n\n`;
-  });
-  await bot.sendMessage(chatId, combined, {
-    parse_mode: 'HTML',
-    disable_web_page_preview: false
-  });
+    const deepLink = `https://t.me/${usernameForLink}?start=feedback_${q.id}`;
+    const feedbackText = `<a href="${deepLink}">ارسال بازخورد</a>\n\n`;
+    
+    const itemText = questionText + answerText + feedbackText;
+    
+    if (itemCounter >= ITEMS_PER_MESSAGE) {
+      chunks.push(currentChunk);
+      currentChunk = '📚 ادامه لیست سوالات و پاسخ‌ها:\n\n';
+      itemCounter = 0;
+    }
+    
+    currentChunk += itemText;
+    itemCounter++;
+  }
+  
+  // اضافه کردن آخرین چانک اگر خالی نباشد
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  // ارسال پیام‌ها با تاخیر کوتاه بین هر کدام
+  for (const chunk of chunks) {
+    try {
+      await bot.sendMessage(chatId, chunk, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: false
+      });
+      // تاخیر کوتاه بین ارسال پیام‌ها
+      await new Promise(resolve => setTimeout(resolve, 500));
+    } catch (error) {
+      console.error('Error sending message chunk:', error);
+    }
+  }
 
   try {
     await bot.sendSticker(chatId, 'CAACAgQAAxkBAAIDaWRqhP4v7h8AAUtplwrqAAHMXt5c3wACPxAAAqbxcR4V0yHjRsIKVy8E');
@@ -314,6 +376,10 @@ bot.on('message', async (msg) => {
     }
 
     if (userState.state === 'waiting_for_question') {
+      if (text.length < 50) {
+        await bot.sendMessage(chatId, '❗️ سوال شما باید حداقل ۵۰ کاراکتر باشد. لطفاً سوال خود را با جزئیات بیشتری بنویسید.');
+        return;
+      }
       const usernameDisplay = userState.username && userState.username !== 'بدون نام کاربری' ? `@${userState.username}` : '';
       // Do NOT include post link for /question flow
       const questionMessage = `📩 یک سؤال جدید از کاربر ${usernameDisplay}\n\n${text}\n\nchatId:${chatId}`;
@@ -419,6 +485,10 @@ bot.on('message', async (msg) => {
       }
       return;
     }
+    if (text.length < 50) {
+      await bot.sendMessage(adminId, '❗️ پاسخ شما باید حداقل ۵۰ کاراکتر باشد. لطفاً پاسخ را با جزئیات بیشتری بنویسید.');
+      return;
+    }
     await Feedback.findByIdAndUpdate(fbId, { $push: { adminReplies: text }, $set: { status: 'waiting_admin' } });
     await bot.sendMessage(adminId, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
     return;
@@ -487,9 +557,12 @@ bot.on('message', async (msg) => {
   }
 
   // Store the reply in the buffer
+  if (text.length < 50) {
+    await bot.sendMessage(adminId, '❗️ پاسخ شما باید حداقل ۵۰ کاراکتر باشد. لطفاً پاسخ را با جزئیات بیشتری بنویسید.');
+    return;
+  }
   const questionData = global.adminQuestionReplyBuffer.get(bufferKey);
   questionData.replies.push(text);
   global.adminQuestionReplyBuffer.set(bufferKey, questionData);
-  
   await bot.sendMessage(adminId, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
 });
