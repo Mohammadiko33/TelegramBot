@@ -159,7 +159,6 @@ bot.on('callback_query', async (callbackQuery) => {
   const chatId = callbackQuery.message.chat.id;
 
   if (data === 'show_quick_answer') {
-    let combined = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n';
     if (!botUsername) {
       try {
         const info = await bot.getMe();
@@ -168,17 +167,50 @@ bot.on('callback_query', async (callbackQuery) => {
         console.error('Failed to get bot username for deep links:', e && e.message);
       }
     }
-    questions.forEach((q, idx) => {
-      combined += `${idx + 1}. <a href=\"https://t.me/questions_islam/${q.id}\">${q.question}</a>\n`;
-      combined += `<a href=\"${q.answerSite}\">پاسخ در سایت</a>\n`;
+
+    const ITEMS_PER_MESSAGE = 10; // تعداد آیتم در هر پیام
+    const chunks = [];
+    let currentChunk = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n';
+    let itemCounter = 0;
+
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      const questionText = `${i + 1}. <a href="https://t.me/questions_islam/${q.id}">${q.question}</a>\n`;
+      const answerText = `<a href="${q.answerSite}">پاسخ در سایت</a>\n`;
       const usernameForLink = botUsername ? botUsername : '<your_bot_username>';
       const deepLink = `https://t.me/${usernameForLink}?start=feedback_${q.id}`;
-      combined += `<a href=\"${deepLink}\">ارسال بازخورد</a>\n\n`;
-    });
-    await bot.sendMessage(chatId, combined, {
-      parse_mode: 'HTML',
-      disable_web_page_preview: false
-    });
+      const feedbackText = `<a href="${deepLink}">ارسال بازخورد</a>\n\n`;
+      
+      const itemText = questionText + answerText + feedbackText;
+      
+      if (itemCounter >= ITEMS_PER_MESSAGE) {
+        chunks.push(currentChunk);
+        currentChunk = '📚 ادامه لیست سوالات و پاسخ‌ها:\n\n';
+        itemCounter = 0;
+      }
+      
+      currentChunk += itemText;
+      itemCounter++;
+    }
+    
+    // اضافه کردن آخرین چانک اگر خالی نباشد
+    if (currentChunk.length > 0) {
+      chunks.push(currentChunk);
+    }
+
+    // ارسال پیام‌ها با تاخیر کوتاه بین هر کدام
+    for (const chunk of chunks) {
+      try {
+        await bot.sendMessage(chatId, chunk, {
+          parse_mode: 'HTML',
+          disable_web_page_preview: false
+        });
+        // تاخیر کوتاه بین ارسال پیام‌ها
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (error) {
+        console.error('Error sending message chunk:', error);
+      }
+    }
     try {
       await bot.sendSticker(chatId, 'CAACAgQAAxkBAAIDaWRqhP4v7h8AAUtplwrqAAHMXt5c3wACPxAAAqbxcR4V0yHjRsIKVy8E');
     } catch (e) {
