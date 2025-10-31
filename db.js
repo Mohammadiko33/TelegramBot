@@ -404,4 +404,34 @@ module.exports = [
     question: "اسلام واقعی کجاست ؟ همین اسلام آخـ*ـوندا رو میگی ؟",
     answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/islamic-envoy/response.html",
   },
+  {
+    id: 119,
+    question: "بچه ها روزی میارن",
+    answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/child-have-money/response.html",
+  },
+  {
+    id: 120,
+    question: "دروغ مسلمون ها در شهادتین",
+    answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/shahadat-without-see/response.html",
+  },
+  {
+    id: 121,
+    question: "دعا یا دکتر ؟",
+    answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/science-or-religion/response.html",
+  },
+  {
+    id: 122,
+    question: "معجزه دروغین آهن در قرآن",
+    answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/foregin-iron/response.html",
+  },
+  {
+    id: 123,
+    question: "کی این جهان هارو ساخته",
+    answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/who-create-worlds/response.html",
+  },
+  {
+    id: 124,
+    question: "اسلام اوردن ایرانی ها با زور شمشیره",
+    answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/who-create-worlds/response.html/iran-islam-sword/response.html",
+  },
 ];
