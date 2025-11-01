@@ -415,22 +415,22 @@ module.exports = [
     answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/shahadat-without-see/response.html",
   },
   {
-    id: 121,
+    id: 122,
     question: "دعا یا دکتر ؟",
     answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/science-or-religion/response.html",
   },
   {
-    id: 122,
+    id: 123,
     question: "معجزه دروغین آهن در قرآن",
     answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/foregin-iron/response.html",
   },
   {
-    id: 123,
+    id: 124,
     question: "کی این جهان هارو ساخته",
     answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/who-create-worlds/response.html",
   },
   {
-    id: 124,
+    id: 126,
     question: "اسلام اوردن ایرانی ها با زور شمشیره",
     answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/who-create-worlds/response.html/iran-islam-sword/response.html",
   },
