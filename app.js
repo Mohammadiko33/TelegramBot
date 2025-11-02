@@ -100,7 +100,10 @@ const cancelQuestionState = (chatId) => {
 bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   const payload = match && match[1] ? match[1] : null;
-
+  // If user sends /start (without feedback payload), cancel any pending question/feedback state
+  if (!payload || !payload.startsWith('feedback_')) {
+    cancelQuestionState(chatId);
+  }
   if (payload && payload.startsWith('feedback_')) {
     const qid = payload.split('_')[1];
     const q = questions.find(x => String(x.id) === String(qid));
@@ -157,6 +160,9 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
 bot.on('callback_query', async (callbackQuery) => {
   const data = callbackQuery.data || '';
   const chatId = callbackQuery.message.chat.id;
+
+  // User pressed an inline button — cancel any pending question/feedback state first
+  cancelQuestionState(chatId);
 
   if (data === 'show_quick_answer') {
     try {
@@ -233,7 +239,8 @@ bot.on('callback_query', async (callbackQuery) => {
       await bot.answerCallbackQuery(callbackQuery.id);
       return;
     }
-
+    // clear any previous state before starting a new question flow
+    cancelQuestionState(chatId);
     const timeout = setTimeout(() => {
       if (userStates.has(chatId)) {
         bot.sendMessage(chatId, '⏳ زمان پرسیدن سوال به پایان رسید. لطفاً دوباره تلاش کنید.');
@@ -363,22 +370,35 @@ bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
 
-  if (!text || text.startsWith('/')) return;
+  // Handle commands first, before any other processing
+  if (text && text.startsWith('/')) {
+    const command = text.split(' ')[0].toLowerCase();
+    // If it's any command except /cancel (which has its own handler), 
+    // clear the user state before proceeding
+    if (['/start', '/quickanswer', '/question'].includes(command)) {
+      if (userStates.has(chatId)) {
+        clearTimeout(userStates.get(chatId).timeout);
+        userStates.delete(chatId);
+      }
+    }
+    return;
+  }
+
   if (text === "سلام") {
     bot.sendMessage(chatId, " و علیکم سلام دوست اهل پرشیا من \n اگه سوالی داری /question رو بزن")
     return;
   }
 
   if (
-    text.includes("کیر") ||
-    text.includes("کون") ||
-    text.includes("کص") ||
-    text.includes("کس") ||
-    text.includes("dick") ||
-    text.includes("sex") ||
-    text.includes("porn") ||
-    text.includes("pussy") ||
-    text.includes("ass")
+    text.includes("کیر ") ||
+    text.includes("کون ") ||
+    text.includes("کص ") ||
+    text.includes("کس ") ||
+    text.includes("dick ") ||
+    text.includes("sex ") ||
+    text.includes("porn ") ||
+    text.includes("pussy ") ||
+    text.includes("ass ")
   ) {
     bot.sendMessage(chatId, `
       لطفا از کلمات شرم آور استفاده نکنید 
