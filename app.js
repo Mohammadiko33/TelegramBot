@@ -159,33 +159,73 @@ bot.on('callback_query', async (callbackQuery) => {
   const chatId = callbackQuery.message.chat.id;
 
   if (data === 'show_quick_answer') {
-    let combined = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n';
-    if (!botUsername) {
-      try {
-        const info = await bot.getMe();
-        botUsername = info.username;
-      } catch (e) {
-        console.error('Failed to get bot username for deep links:', e && e.message);
-      }
-    }
-    questions.forEach((q, idx) => {
-      combined += `${idx + 1}. <a href=\"https://t.me/questions_islam/${q.id}\">${q.question}</a>\n`;
-      combined += `<a href=\"${q.answerSite}\">پاسخ در سایت</a>\n`;
-      const usernameForLink = botUsername ? botUsername : '<your_bot_username>';
-      const deepLink = `https://t.me/${usernameForLink}?start=feedback_${q.id}`;
-      combined += `<a href=\"${deepLink}\">ارسال بازخورد</a>\n\n`;
-    });
-    await bot.sendMessage(chatId, combined, {
-      parse_mode: 'HTML',
-      disable_web_page_preview: false
-    });
     try {
-      await bot.sendSticker(chatId, 'CAACAgQAAxkBAAIDaWRqhP4v7h8AAUtplwrqAAHMXt5c3wACPxAAAqbxcR4V0yHjRsIKVy8E');
+      if (!Array.isArray(questions) || questions.length === 0) {
+        await bot.sendMessage(chatId, '❗️ در حال حاضر هیچ سوالی موجود نیست.');
+        await bot.answerCallbackQuery(callbackQuery.id);
+        return;
+      }
+
+      if (!botUsername) {
+        try {
+          const info = await bot.getMe();
+          botUsername = info.username;
+        } catch (e) {
+          console.error('Failed to get bot username for deep links:', e && e.message);
+        }
+      }
+
+      // Build chunked messages to avoid Telegram message length limits
+      const ITEMS_PER_MESSAGE = 15;
+      const chunks = [];
+      let currentChunk = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n';
+      let itemCounter = 0;
+
+      for (let i = 0; i < questions.length; i++) {
+        const q = questions[i];
+        const questionText = `${i + 1}. <a href="https://t.me/questions_islam/${q.id}">${q.question}</a>\n`;
+        const answerText = `<a href="${q.answerSite}">پاسخ در سایت</a>\n`;
+        const usernameForLink = botUsername ? botUsername : '<your_bot_username>';
+        const deepLink = `https://t.me/${usernameForLink}?start=feedback_${q.id}`;
+        const feedbackText = `<a href="${deepLink}">ارسال بازخورد</a>\n\n`;
+
+        const itemText = questionText + answerText + feedbackText;
+
+        if (itemCounter >= ITEMS_PER_MESSAGE) {
+          chunks.push(currentChunk);
+          currentChunk = '📚 ادامه لیست سوالات و پاسخ‌ها:\n\n';
+          itemCounter = 0;
+        }
+
+        currentChunk += itemText;
+        itemCounter++;
+      }
+
+      if (currentChunk.length > 0) chunks.push(currentChunk);
+
+      for (const chunk of chunks) {
+        try {
+          await bot.sendMessage(chatId, chunk, { parse_mode: 'HTML', disable_web_page_preview: false });
+          // small pause between messages
+          await new Promise(r => setTimeout(r, 300));
+        } catch (err) {
+          console.error('Error sending quick answer chunk:', err && err.message ? err.message : err);
+        }
+      }
+
+      try {
+        await bot.sendSticker(chatId, 'CAACAgQAAxkBAAIDaWRqhP4v7h8AAUtplwrqAAHMXt5c3wACPxAAAqbxcR4V0yHjRsIKVy8E');
+      } catch (e) {
+        console.error('Failed to send sticker:', e && e.message);
+      }
+
+      await bot.answerCallbackQuery(callbackQuery.id);
+      return;
     } catch (e) {
-      console.error('Failed to send sticker:', e && e.message);
+      console.error('Error in show_quick_answer handler:', e && e.message ? e.message : e);
+      try { await bot.answerCallbackQuery(callbackQuery.id, { text: 'خطا در ارسال لیست.' }); } catch(_){}
+      return;
     }
-    await bot.answerCallbackQuery(callbackQuery.id);
-    return;
   }
   if (data === 'ask_new_question') {
     // Return immediately if user is admin
@@ -463,7 +503,8 @@ bot.on('message', async (msg) => {
     if (text.trim().toLowerCase() === 'پایان') {
       const fb = await Feedback.findById(fbId);
       if (fb && fb.adminReplies && fb.adminReplies.length > 0) {
-        await bot.sendMessage(fb.userChatId, 'پاسخ ادمین به بازخورد شما:');
+        const previewText = (fb.userFeedback || '').split(' ').slice(0, 5).join(' ') + '...';
+        await bot.sendMessage(fb.userChatId, `پاسخ ادمین به بازخورد "${previewText}":`);
         for (const r of fb.adminReplies) {
           await bot.sendMessage(fb.userChatId, r);
         }
@@ -529,11 +570,8 @@ bot.on('message', async (msg) => {
     const { replies, targetChatId, userQuestion } = questionData;
 
     if (replies.length > 0) {
-      let header = 'پاسخ ادمین به سوال شما';
-      if (userQuestion) {
-        header += ` (${userQuestion.slice(0, 40)}...)`;
-      }
-      await bot.sendMessage(targetChatId, header);
+      const previewText = userQuestion ? userQuestion.split(' ').slice(0, 5).join(' ') + '...' : '';
+      await bot.sendMessage(targetChatId, `پاسخ ادمین به سوال "${previewText}":`);
       
       // Send all replies to user
       for (const r of replies) {
