@@ -27,7 +27,24 @@ const loadQuestions = async () => {
 
 const bot = new telegramBot(token, { polling: true });
 
-loadQuestions().catch(console.error);
+// helper to send long messages in chunks (Telegram limit ~4096 chars)
+async function sendLongMessage(chatId, text, options = {}) {
+  try {
+    const MAX = 4000;
+    if (!text) return;
+    if (text.length <= MAX) {
+      return await bot.sendMessage(chatId, text, options);
+    }
+    for (let i = 0; i < text.length; i += MAX) {
+      const chunk = text.slice(i, i + MAX);
+      // small delay to avoid hitting rate limits
+      await bot.sendMessage(chatId, chunk, options);
+      await new Promise(r => setTimeout(r, 150));
+    }
+  } catch (e) {
+    console.error('sendLongMessage error:', e && e.message ? e.message : e);
+  }
+}
 
 let botUsername = process.env.BOT_USERNAME || null;
 if (!botUsername) {
@@ -45,7 +62,11 @@ const mongoose = require('mongoose');
 mongoose.connect('mongodb://127.0.0.1:27017/questionIslamBot', {
   useNewUrlParser: true,
   useUnifiedTopology: true
-}).then(() => console.log('Connected to MongoDB questionIslamBot')).catch(err => console.error('MongoDB connect error:', err && err.message));
+}).then(() => {
+  console.log('Connected to MongoDB questionIslamBot');
+  // load questions after Question model is initialized and DB is connected
+  loadQuestions().catch(console.error);
+}).catch(err => console.error('MongoDB connect error:', err && err.message));
 
 const questionSchema = new mongoose.Schema({
   id: { type: Number, required: true, unique: true },
@@ -368,7 +389,7 @@ bot.onText(/\/cancel/, (msg) => {
 
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
-  const text = msg.text;
+  const text = msg.text || '';
 
   // Handle commands first, before any other processing
   if (text && text.startsWith('/')) {
@@ -427,7 +448,7 @@ bot.on('message', async (msg) => {
           await fb.save();
 
           const adminMsg = `📩 بازخورد جدید از ${fb.username || ''} برای سوال:\n\n${fb.questionText}\n\nمتن بازخورد:\n${text}\n\nFeedbackID:${fb._id}\nchatId:${fb.userChatId}`;
-          await bot.sendMessage(adminId, adminMsg);
+          await sendLongMessage(adminId, adminMsg);
           await bot.sendMessage(chatId, '✅ بازخورد شما ثبت و برای مدیریت ارسال شد.');
         }
       } catch (e) {
@@ -497,9 +518,9 @@ bot.on('callback_query', async (callbackQuery) => {
     const q = questions.find(x => String(x.id) === String(qid));
     const user = callbackQuery.from;
 
-    const feedbackMsg = `📣 درخواست بازخورد از کاربر @${user.username || 'بدون نام کاربری'}:\n\nسوال: ${q ? q.question : 'نامشخص'}\nلینک پست: https://t.me/questions_islam/${qid}\n\nchatId:${callbackQuery.from.id}`;
+  const feedbackMsg = `📣 درخواست بازخورد از کاربر @${user.username || 'بدون نام کاربری'}:\n\nسوال: ${q ? q.question : 'نامشخص'}\nلینک پست: https://t.me/questions_islam/${qid}\n\nchatId:${callbackQuery.from.id}`;
 
-    await bot.sendMessage(adminId, feedbackMsg);
+  await sendLongMessage(adminId, feedbackMsg);
     await bot.answerCallbackQuery(callbackQuery.id, { text: 'بازخورد برای مدیریت ارسال شد.' });
     return;
   }
