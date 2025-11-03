@@ -390,6 +390,7 @@ bot.onText(/\/cancel/, (msg) => {
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text || '';
+  const normalizedText = (text || '').trim();
 
   // Handle commands first, before any other processing
   if (text && text.startsWith('/')) {
@@ -501,12 +502,36 @@ bot.on('message', async (msg) => {
     'یک تضاد پیدا کردم تو اسلام',
     'یک مشکل پیدا کردم تو اسلام'
   ];
+  if (validQuestionPhrases.includes(normalizedText)) {
+    // Start the same flow as /question
+    if (chatId.toString() === adminId.toString()) return;
 
-  if (validQuestionPhrases.includes(text)) {
-    bot.sendMessage(
-      chatId,
-      'برای پرسیدن سوال، لطفاً از دستور /question استفاده کنید یا یکی از عبارات زیر را بنویسید:\n- سوال دارم\n- یک تضاد پیدا کردم تو اسلام\n- یک مشکل پیدا کردم تو اسلام'
-    );
+    // Clear any existing state for this chat
+    if (userStates.has(chatId)) {
+      clearTimeout(userStates.get(chatId).timeout);
+      userStates.delete(chatId);
+    }
+
+    const userId = msg.from.id;
+    const username = msg.from.username || 'بدون نام کاربری';
+
+    const timeout = setTimeout(() => {
+      if (userStates.has(chatId)) {
+        bot.sendMessage(chatId, '⏳ زمان پرسیدن سوال به پایان رسید. لطفاً دوباره تلاش کنید.');
+        cancelQuestionState(chatId);
+      }
+    }, 5 * 60 * 1000); // 5 minutes
+
+    userStates.set(chatId, {
+      state: 'waiting_for_question',
+      userId,
+      username,
+      timeout
+    });
+
+    if (chatId.toString() !== adminId.toString()) {
+      bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.');
+    }
   } else {
     if (chatId.toString() !== adminId.toString()) {
       bot.sendMessage(
