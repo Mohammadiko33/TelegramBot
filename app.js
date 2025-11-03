@@ -419,7 +419,16 @@ bot.on('message', async (msg) => {
     text.includes("sex ") ||
     text.includes("porn ") ||
     text.includes("pussy ") ||
-    text.includes("ass ")
+    text.includes("ass ") ||
+    text === "کیر" ||
+    text === "کون" ||
+    text === "کص" ||
+    text === "کس" ||
+    text === "dick" ||
+    text === "sex" ||
+    text === "porn" ||
+    text === "pussy" ||
+    text === "ass"
   ) {
     bot.sendMessage(chatId, `
       لطفا از کلمات شرم آور استفاده نکنید 

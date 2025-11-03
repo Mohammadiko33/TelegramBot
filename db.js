@@ -246,7 +246,7 @@ module.exports = [
   },
   {
     id: 64,
-    question: "لعان من باید اسلام شما رو قبول کنم یا اسلام عرب هارو (||عرب هایی که نماد کعبه رو گذاشته بودند روش رقص و پایکوبی میکردند||) ؟",
+    question: "العان من باید اسلام شما رو قبول کنم یا اسلام عرب هارو (||عرب هایی که نماد کعبه رو گذاشته بودند روش رقص و پایکوبی میکردند||) ؟",
     answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/islam-iran-or-arabstan/response.html"
   },
   {
