@@ -1,142 +1,23 @@
 require('dotenv').config();
-const telegramBot = require('node-telegram-bot-api');
-const token = process.env.TOKEN || null;
-const adminId = process.env.ADMIN_ID;
-const defaultQuestions = require('./db');
-
-let questions = [];
-
-const loadQuestions = async () => {
-  try {
-    questions = await Question.find().sort({ id: 1 });
-    
-    if (questions.length === 0) {
-      console.log('No questions found in MongoDB, loading from default data...');
-      await Question.insertMany(defaultQuestions);
-      questions = await Question.find().sort({ id: 1 });
-      console.log(`Loaded ${questions.length} questions from default data into MongoDB`);
-    } else {
-      console.log(`Loaded ${questions.length} questions from MongoDB`);
-    }
-  } catch (error) {
-    console.error('Error loading questions:', error);
-    questions = defaultQuestions;
-    console.log('Using default questions from db.js');
-  }
-};
-
+const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const path = require('path');
 const { SocksProxyAgent } = require('socks-proxy-agent');
+const mongoose = require('mongoose');
+
+const token = process.env.TOKEN || null;
+const ADMIN_ID = String(process.env.ADMIN_ID || '');
 const PROXY_FILE = path.join(__dirname, 'proxy.json');
 
+// State
 let bot = null;
-
-function saveProxyToFile(proxy) {
-  try {
-    fs.writeFileSync(PROXY_FILE, JSON.stringify({ proxy }, null, 2), 'utf8');
-  } catch (e) {
-    console.error('Failed to save proxy file:', e && e.message ? e.message : e);
-  }
-}
-
-function deleteProxyFile() {
-  try {
-    if (fs.existsSync(PROXY_FILE)) fs.unlinkSync(PROXY_FILE);
-  } catch (e) {
-    console.error('Failed to delete proxy file:', e && e.message ? e.message : e);
-  }
-}
-
-function loadProxyFromFile() {
-  try {
-    if (!fs.existsSync(PROXY_FILE)) return null;
-    const raw = fs.readFileSync(PROXY_FILE, 'utf8');
-    const obj = JSON.parse(raw);
-    return obj && obj.proxy ? obj.proxy : null;
-  } catch (e) {
-    console.error('Failed to load proxy file:', e && e.message ? e.message : e);
-    return null;
-  }
-}
-
-async function createBotWithProxy(proxyUrl) {
-  try {
-    if (bot) {
-      try {
-        await bot.stopPolling();
-      } catch (e) {}
-      try {
-        bot.removeAllListeners && bot.removeAllListeners();
-      } catch (e) {}
-      bot = null;
-    }
-
-    const options = { polling: true };
-    if (proxyUrl) {
-      const agent = new SocksProxyAgent(proxyUrl);
-      options.request = { agent };
-    }
-
-    bot = new telegramBot(token, options);
-
-    // re-register handlers on the new bot instance
-    registerHandlers();
-
-    try {
-      const info = await bot.getMe();
-      botUsername = info.username || botUsername;
-      console.log('Bot username:', botUsername);
-    } catch (e) {
-      console.warn('Could not get bot username; deep links may not work until available.');
-    }
-
-    console.log('Bot started' + (proxyUrl ? ` with proxy ${proxyUrl}` : ' without proxy'));
-  } catch (e) {
-    console.error('Error creating bot with proxy:', e && e.message ? e.message : e);
-  }
-}
-
-// helper to send long messages in chunks (Telegram limit ~4096 chars)
-async function sendLongMessage(chatId, text, options = {}) {
-  try {
-    const MAX = 4000;
-    if (!text) return;
-    if (text.length <= MAX) {
-      return await bot.sendMessage(chatId, text, options);
-    }
-    for (let i = 0; i < text.length; i += MAX) {
-      const chunk = text.slice(i, i + MAX);
-      // small delay to avoid hitting rate limits
-      await bot.sendMessage(chatId, chunk, options);
-      await new Promise(r => setTimeout(r, 150));
-    }
-  } catch (e) {
-    console.error('sendLongMessage error:', e && e.message ? e.message : e);
-  }
-}
-
 let botUsername = process.env.BOT_USERNAME || null;
-if (botUsername) {
-  console.log('Using BOT_USERNAME from env:', botUsername);
-}
+let questions = [];
+const userStates = new Map(); // chatId -> { state, timeout, ... }
+if (!global.adminQuestionReplyBuffer) global.adminQuestionReplyBuffer = new Map();
 
-const mongoose = require('mongoose');
-mongoose.connect('mongodb://127.0.0.1:27017/questionIslamBot', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => {
-  console.log('Connected to MongoDB questionIslamBot');
-  // load questions after Question model is initialized and DB is connected
-  loadQuestions().catch(console.error);
-}).catch(err => console.error('MongoDB connect error:', err && err.message));
-
-const questionSchema = new mongoose.Schema({
-  id: { type: Number, required: true, unique: true },
-  question: { type: String, required: true },
-  answerSite: { type: String, required: true },
-  createdAt: { type: Date, default: Date.now }
-});
+// --- Mongoose models ---
+const questionSchema = new mongoose.Schema({ id: Number, question: String, answerSite: String, createdAt: Date });
 const Question = mongoose.model('Question', questionSchema);
 
 const feedbackSchema = new mongoose.Schema({
@@ -159,8 +40,8 @@ const answerLogSchema = new mongoose.Schema({
   userChatId: Number,
   userId: Number,
   username: String,
-  userQuestion: String, // for /question
-  userFeedback: String, // for feedback
+  userQuestion: String,
+  userFeedback: String,
   adminId: String,
   adminUsername: String,
   adminAnswers: [String],
@@ -168,626 +49,305 @@ const answerLogSchema = new mongoose.Schema({
 });
 const AnswerLog = mongoose.model('AnswerLog', answerLogSchema);
 
-const userStates = new Map();
-const adminReplies = new Map();
-const userChats = new Map();
+const defaultQuestions = require('./db');
 
-const cancelQuestionState = (chatId) => {
-  if (userStates.has(chatId)) {
-    clearTimeout(userStates.get(chatId).timeout);
-    userStates.delete(chatId);
+// --- DB helpers ---
+async function loadQuestions() {
+  try {
+    const docs = await Question.find().sort({ id: 1 }).lean();
+    if (!docs || docs.length === 0) {
+      console.log('No questions in DB — loading defaults');
+      await Question.insertMany(defaultQuestions);
+      questions = await Question.find().sort({ id: 1 }).lean();
+    } else {
+      questions = docs;
+    }
+    console.log(`Loaded ${questions.length} questions`);
+  } catch (err) {
+    console.error('loadQuestions error:', err && err.message ? err.message : err);
+    questions = defaultQuestions || [];
+  }
+}
+
+// --- Proxy helpers ---
+function loadProxyFromFile() {
+  try {
+    if (!fs.existsSync(PROXY_FILE)) return null;
+    const raw = fs.readFileSync(PROXY_FILE, 'utf8');
+    const obj = JSON.parse(raw);
+    return obj && obj.proxy ? obj.proxy : null;
+  } catch (e) {
+    console.error('Failed to load proxy file:', e && e.message ? e.message : e);
+    return null;
+  }
+}
+
+function saveProxyToFile(proxy) {
+  try {
+    fs.writeFileSync(PROXY_FILE, JSON.stringify({ proxy }, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Failed to save proxy file:', e && e.message ? e.message : e);
+  }
+}
+
+function deleteProxyFile() {
+  try {
+    if (fs.existsSync(PROXY_FILE)) fs.unlinkSync(PROXY_FILE);
+  } catch (e) {
+    console.error('Failed to delete proxy file:', e && e.message ? e.message : e);
+  }
+}
+
+function validateSocks5Url(urlString) {
+  try {
+    const u = new URL(urlString);
+    if (u.protocol !== 'socks5:') return false;
+    const host = u.hostname;
+    const port = parseInt(u.port, 10);
+    if (!host || Number.isNaN(port) || port <= 0 || port > 65535) return false;
     return true;
+  } catch (e) {
+    return false;
   }
-  return false;
-};
+}
 
-function registerHandlers() {
-  // Admin proxy commands: add and remove proxy
-  bot.on('message', async (msg) => {
-    const text = msg.text || '';
-    if (!text) return;
-
-    // افزودن پروکسی (socks5://IP:PORT)
-    const addMatch = text.match(/^افزودن پروکسی \((socks5:\/\/[^"]+)\)$/u);
-    if (addMatch) {
-      // only admin
-      if (String(msg.from.id) !== String(adminId)) {
-        await bot.sendMessage(msg.chat.id, 'شما اجازه انجام این کار را ندارید');
-        return;
-      }
-      const proxyUrl = addMatch[1];
-      // basic format validation
-      if (!/^socks5:\/\/\d+\.\d+\.\d+\.\d+:\d+$/.test(proxyUrl)) {
-        await bot.sendMessage(msg.chat.id, 'فرمت پروکسی صحیح نیست');
-        return;
-      }
-      saveProxyToFile(proxyUrl);
-      await bot.sendMessage(msg.chat.id, 'پروکسی با موفقیت ست شد');
-      // restart bot with proxy
-      await createBotWithProxy(proxyUrl);
-      return;
+// --- Bot lifecycle ---
+async function createBotWithProxy(proxyUrl) {
+  try {
+    if (bot) {
+      try { await bot.stopPolling(); } catch (e) {}
+      try { bot.removeAllListeners && bot.removeAllListeners(); } catch (e) {}
+      bot = null;
     }
 
-    // حذف پروکسی
-    if (text.trim() === 'حذف پروکسی') {
-      if (String(msg.from.id) !== String(adminId)) {
-        await bot.sendMessage(msg.chat.id, 'شما اجازه انجام این کار را ندارید');
-        return;
-      }
-      deleteProxyFile();
-      await bot.sendMessage(msg.chat.id, 'پروکسی حذف شد');
-      await createBotWithProxy(null);
-      return;
+    const options = { polling: true };
+    if (proxyUrl) {
+      const agent = new SocksProxyAgent(proxyUrl);
+      options.request = { agent };
     }
-  });
 
-  bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const payload = match && match[1] ? match[1] : null;
-  // If user sends /start (without feedback payload), cancel any pending question/feedback state
-  if (!payload || !payload.startsWith('feedback_')) {
-    cancelQuestionState(chatId);
-  }
-  if (payload && payload.startsWith('feedback_')) {
-    const qid = payload.split('_')[1];
-    const q = questions.find(x => String(x.id) === String(qid));
-    const username = msg.from.username || '';
+    bot = new TelegramBot(token, options);
 
-    const fb = new Feedback({
-      questionId: Number(qid),
-      questionText: q ? q.question : '',
-      userChatId: msg.from.id,
-      userId: msg.from.id,
-      username: username ? `@${username}` : '',
-      status: 'waiting_for_text'
-    });
-    await fb.save();
+    registerHandlers();
 
-    const timeout = setTimeout(() => {
-      if (userStates.has(chatId) && userStates.get(chatId).state === 'waiting_for_feedback') {
-        userStates.delete(chatId);
-      }
-    }, 5 * 60 * 1000);
-    userStates.set(chatId, { state: 'waiting_for_feedback', feedbackId: fb._id, timeout });
-
-    await bot.sendMessage(chatId, `لطفا متن بازخورد برای پست "${q ? q.question : ''}" را بنویسید. پس از ارسال، من آن را برای مدیریت می‌فرستم.`);
-    return;
-  }
-
-  const welcomeMessage = `🌟 خوش آمدید به ربات پاسخگوی سوالات اسلامی!\n\n🤖 این ربات به شما کمک می‌کند تا:\n- سوالات خود درباره اسلام را بپرسید\n- به پاسخ‌های موجود دسترسی داشته باشید\n- با مطالب آموزنده آشنا شوید\n\n📝 دستورات موجود:\n/start - شروع مجدد ربات\n/quickAnswer - مشاهده لیست تمام سوالات و پاسخ‌ها\n/question - پرسیدن سوال جدید\n/cancel - لغو عملیات فعلی\n\n🔍 نمونه سوالات رندوم:`;
-
-  let randomQuestions = [];
-  if (questions.length > 0) {
-    const shuffled = questions.slice().sort(() => 0.5 - Math.random());
-    randomQuestions = shuffled.slice(0, 3);
-  }
-  let questionsMessage = '';
-  randomQuestions.forEach(q => {
-    questionsMessage += `❓ <a href=\"https://t.me/questions_islam/${q.id}\">${q.question}</a>\n`;
-  });
-  const fullMessage = `${welcomeMessage}\n\n${questionsMessage || '❗️ نمونه سوال در حال حاضر موجود نیست.'}`;
-  const keyboard = {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: 'سوالاتی که قبلا پاسخ داده شده', callback_data: 'show_quick_answer' },
-          { text: 'پرسیدن سوال جدید', callback_data: 'ask_new_question' }
-        ]
-      ]
-    },
-    parse_mode: 'HTML',
-    disable_web_page_preview: false
-  };
-  await bot.sendMessage(chatId, fullMessage, keyboard);
-});
-
-bot.on('callback_query', async (callbackQuery) => {
-  const data = callbackQuery.data || '';
-  const chatId = callbackQuery.message.chat.id;
-
-  // User pressed an inline button — cancel any pending question/feedback state first
-  cancelQuestionState(chatId);
-
-  if (data === 'show_quick_answer') {
-    try {
-      if (!Array.isArray(questions) || questions.length === 0) {
-        await bot.sendMessage(chatId, '❗️ در حال حاضر هیچ سوالی موجود نیست.');
-        await bot.answerCallbackQuery(callbackQuery.id);
-        return;
-      }
-
-      if (!botUsername) {
-        try {
-          const info = await bot.getMe();
-          botUsername = info.username;
-        } catch (e) {
-          console.error('Failed to get bot username for deep links:', e && e.message);
-        }
-      }
-
-      // Build chunked messages to avoid Telegram message length limits
-      const ITEMS_PER_MESSAGE = 15;
-      const chunks = [];
-      let currentChunk = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n';
-      let itemCounter = 0;
-
-      for (let i = 0; i < questions.length; i++) {
-        const q = questions[i];
-        const questionText = `${i + 1}. <a href="https://t.me/questions_islam/${q.id}">${q.question}</a>\n`;
-        const answerText = `<a href="${q.answerSite}">پاسخ در سایت</a>\n`;
-        const usernameForLink = botUsername ? botUsername : '<your_bot_username>';
-        const deepLink = `https://t.me/${usernameForLink}?start=feedback_${q.id}`;
-        const feedbackText = `<a href="${deepLink}">ارسال بازخورد</a>\n\n`;
-
-        const itemText = questionText + answerText + feedbackText;
-
-        if (itemCounter >= ITEMS_PER_MESSAGE) {
-          chunks.push(currentChunk);
-          currentChunk = '📚 ادامه لیست سوالات و پاسخ‌ها:\n\n';
-          itemCounter = 0;
-        }
-
-        currentChunk += itemText;
-        itemCounter++;
-      }
-
-      if (currentChunk.length > 0) chunks.push(currentChunk);
-
-      for (const chunk of chunks) {
-        try {
-          await bot.sendMessage(chatId, chunk, { parse_mode: 'HTML', disable_web_page_preview: false });
-          // small pause between messages
-          await new Promise(r => setTimeout(r, 300));
-        } catch (err) {
-          console.error('Error sending quick answer chunk:', err && err.message ? err.message : err);
-        }
-      }
-
-      try {
-        await bot.sendSticker(chatId, 'CAACAgQAAxkBAAIDaWRqhP4v7h8AAUtplwrqAAHMXt5c3wACPxAAAqbxcR4V0yHjRsIKVy8E');
-      } catch (e) {
-        console.error('Failed to send sticker:', e && e.message);
-      }
-
-      await bot.answerCallbackQuery(callbackQuery.id);
-      return;
-    } catch (e) {
-      console.error('Error in show_quick_answer handler:', e && e.message ? e.message : e);
-      try { await bot.answerCallbackQuery(callbackQuery.id, { text: 'خطا در ارسال لیست.' }); } catch(_){}
-      return;
-    }
-  }
-  if (data === 'ask_new_question') {
-    // Return immediately if user is admin
-    if (chatId.toString() === adminId.toString()) {
-      await bot.answerCallbackQuery(callbackQuery.id);
-      return;
-    }
-    // clear any previous state before starting a new question flow
-    cancelQuestionState(chatId);
-    const timeout = setTimeout(() => {
-      if (userStates.has(chatId)) {
-        bot.sendMessage(chatId, '⏳ زمان پرسیدن سوال به پایان رسید. لطفاً دوباره تلاش کنید.');
-        cancelQuestionState(chatId);
-      }
-    }, 5 * 60 * 1000); // 5 minutes
-
-    userStates.set(chatId, {
-      state: 'waiting_for_question',
-      userId: callbackQuery.from.id,
-      username: callbackQuery.from.username || 'بدون نام کاربری',
-      timeout
-    });
-
-    if (chatId.toString() !== adminId.toString()) {
-      await bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.');
-    }
-    await bot.answerCallbackQuery(callbackQuery.id);
-    return;
-  }
-});
-
-bot.onText(/\/quickAnswer/, async (msg) => {
-  const chatId = msg.chat.id;
-
-  if (!botUsername) {
     try {
       const info = await bot.getMe();
-      botUsername = info.username;
+      botUsername = info && info.username ? info.username : botUsername;
+      console.log('Bot username:', botUsername);
     } catch (e) {
-      console.error('Failed to get bot username for deep links:', e && e.message);
+      console.warn('Could not get bot username; deep links may not work until available.');
     }
-  }
 
-  const ITEMS_PER_MESSAGE = 15;
-  const chunks = [];
-  let currentChunk = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n';
-  let itemCounter = 0;
-
-  for (let i = 0; i < questions.length; i++) {
-    const q = questions[i];
-    const questionText = `${i + 1}. <a href="https://t.me/questions_islam/${q.id}">${q.question}</a>\n`;
-    const answerText = `<a href="${q.answerSite}">پاسخ در سایت</a>\n`;
-    const usernameForLink = botUsername ? botUsername : '<your_bot_username>';
-    const deepLink = `https://t.me/${usernameForLink}?start=feedback_${q.id}`;
-    const feedbackText = `<a href="${deepLink}">ارسال بازخورد</a>\n\n`;
-    
-    const itemText = questionText + answerText + feedbackText;
-    
-    if (itemCounter >= ITEMS_PER_MESSAGE) {
-      chunks.push(currentChunk);
-      currentChunk = '📚 ادامه لیست سوالات و پاسخ‌ها:\n\n';
-      itemCounter = 0;
-    }
-    
-    currentChunk += itemText;
-    itemCounter++;
-  }
-  
-  // اضافه کردن آخرین چانک اگر خالی نباشد
-  if (currentChunk.length > 0) {
-    chunks.push(currentChunk);
-  }
-
-  // ارسال پیام‌ها با تاخیر کوتاه بین هر کدام
-  for (const chunk of chunks) {
-    try {
-      await bot.sendMessage(chatId, chunk, {
-        parse_mode: 'HTML',
-        disable_web_page_preview: false
-      });
-      // تاخیر کوتاه بین ارسال پیام‌ها
-      await new Promise(resolve => setTimeout(resolve, 500));
-    } catch (error) {
-      console.error('Error sending message chunk:', error);
-    }
-  }
-
-  try {
-    await bot.sendSticker(chatId, 'CAACAgQAAxkBAAIDaWRqhP4v7h8AAUtplwrqAAHMXt5c3wACPxAAAqbxcR4V0yHjRsIKVy8E');
+    console.log('Bot started' + (proxyUrl ? ` with proxy ${proxyUrl}` : ' without proxy'));
   } catch (e) {
-    console.error('Failed to send sticker:', e && e.message);
+    console.error('createBotWithProxy error:', e && e.message ? e.message : e);
   }
-});
+}
 
-bot.onText(/\/question/, (msg) => {
-  const chatId = msg.chat.id;
-  
-  // Immediately return if message is from admin
-  if (chatId.toString() === adminId.toString()) {
-    return;
-  }
+function registerHandlers() {
+  if (!bot) return;
+  try { bot.removeAllListeners('message'); } catch (e) {}
+  try { bot.removeAllListeners('callback_query'); } catch (e) {}
+  try { bot.removeAllListeners('polling_error'); } catch (e) {}
 
-  const userId = msg.from.id;
-  const username = msg.from.username || 'بدون نام کاربری';
+  bot.on('message', handleMessage);
 
-  const timeout = setTimeout(() => {
-    if (userStates.has(chatId)) {
-      bot.sendMessage(chatId, '⏳ زمان پرسیدن سوال به پایان رسید. لطفاً دوباره تلاش کنید.');
-      cancelQuestionState(chatId);
-    }
-  }, 5 * 60 * 1000); // 5 minutes
+  bot.on('callback_query', async (callbackQuery) => {
+    try {
+      const data = callbackQuery.data || '';
+      const chatId = callbackQuery.message ? callbackQuery.message.chat.id : (callbackQuery.from && callbackQuery.from.id);
+      if (chatId) cancelQuestionState(chatId);
 
-  userStates.set(chatId, {
-    state: 'waiting_for_question',
-    userId,
-    username,
-    timeout
+      if (data === 'show_quick_answer') { await sendQuickAnswerList(chatId); await bot.answerCallbackQuery(callbackQuery.id); return; }
+      if (data === 'ask_new_question') { if (String(chatId) === String(ADMIN_ID)) { await bot.answerCallbackQuery(callbackQuery.id); return; } startQuestionFlow(chatId, callbackQuery.from); await bot.answerCallbackQuery(callbackQuery.id); return; }
+      if (data && data.startsWith('feedback_')) { const qid = data.split('_')[1]; await startFeedbackFlowFromDeepLink(callbackQuery.from.id, qid); await bot.answerCallbackQuery(callbackQuery.id); return; }
+      if (data && data.startsWith('feedback:')) { const qid = data.split(':')[1]; const q = questions.find(x => String(x.id) === String(qid)); const user = callbackQuery.from; const feedbackMsg = `📣 درخواست بازخورد از کاربر @${user.username || 'بدون نام کاربری'}:\n\nسوال: ${q ? q.question : 'نامشخص'}\nلینک پست: https://t.me/questions_islam/${qid}\n\nchatId:${callbackQuery.from.id}`; await sendLongMessage(ADMIN_ID, feedbackMsg); await bot.answerCallbackQuery(callbackQuery.id, { text: 'بازخورد برای مدیریت ارسال شد.' }); return; }
+    } catch (err) { console.error('callback_query handler error:', err && err.message ? err.message : err); }
   });
 
-  if (chatId.toString() !== adminId.toString()) {
-    bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.');
-  }
-});
+  bot.on('polling_error', (err) => { console.error('polling_error:', err && err.message ? err.message : err); });
+}
 
-bot.onText(/\/cancel/, (msg) => {
-  const chatId = msg.chat.id;
+// --- Utilities ---
+async function sendLongMessage(chatId, text, options = {}) {
+  try {
+    const MAX = 4000;
+    if (!text) return;
+    if (text.length <= MAX) return await bot.sendMessage(chatId, text, options);
+    for (let i = 0; i < text.length; i += MAX) { const chunk = text.slice(i, i + MAX); await bot.sendMessage(chatId, chunk, options); await new Promise(r => setTimeout(r, 150)); }
+  } catch (e) { console.error('sendLongMessage error:', e && e.message ? e.message : e); }
+}
 
-  if (cancelQuestionState(chatId)) {
-    bot.sendMessage(chatId, '❌ عملیات لغو شد.');
-  } else {
-    bot.sendMessage(chatId, '❗️ عملیاتی برای لغو کردن وجود ندارد.');
-  }
-});
+async function sendQuickAnswerList(chatId) {
+  if (!Array.isArray(questions) || questions.length === 0) { await bot.sendMessage(chatId, '❗️ در حال حاضر هیچ سوالی موجود نیست.'); return; }
+  const ITEMS_PER_MESSAGE = 15; const chunks = []; let current = '📚 لیست تمام سوالات و پاسخ‌ها:\n\n'; let counter = 0; const usernameForLink = botUsername ? botUsername : '<your_bot_username>';
+  for (let i = 0; i < questions.length; i++) { const q = questions[i]; current += `${i + 1}. <a href="https://t.me/questions_islam/${q.id}">${q.question}</a>\n`; current += `<a href="${q.answerSite}">پاسخ در سایت</a>\n`; current += `<a href="https://t.me/${usernameForLink}?start=feedback_${q.id}">ارسال بازخورد</a>\n\n`; counter++; if (counter >= ITEMS_PER_MESSAGE) { chunks.push(current); current = '📚 ادامه لیست سوالات و پاسخ‌ها:\n\n'; counter = 0; } }
+  if (current.length) chunks.push(current); for (const c of chunks) { await bot.sendMessage(chatId, c, { parse_mode: 'HTML', disable_web_page_preview: false }); await new Promise(r => setTimeout(r, 300)); }
+  try { await bot.sendSticker(chatId, 'CAACAgQAAxkBAAIDaWRqhP4v7h8AAUtplwrqAAHMXt5c3wACPxAAAqbxcR4V0yHjRsIKVy8E'); } catch (e) {}
+}
 
-bot.on('message', async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text || '';
-  const normalizedText = (text || '').trim();
+function cancelQuestionState(chatId) { if (userStates.has(chatId)) { try { clearTimeout(userStates.get(chatId).timeout); } catch (e) {} userStates.delete(chatId); return true; } return false; }
 
-  // Handle commands first, before any other processing
-  if (text && text.startsWith('/')) {
-    const command = text.split(' ')[0].toLowerCase();
-    // If it's any command except /cancel (which has its own handler), 
-    // clear the user state before proceeding
-    if (['/start', '/quickanswer', '/question'].includes(command)) {
-      if (userStates.has(chatId)) {
-        clearTimeout(userStates.get(chatId).timeout);
-        userStates.delete(chatId);
-      }
+function startQuestionFlow(chatId, from) { if (String(chatId) === String(ADMIN_ID)) return; if (userStates.has(chatId)) { try { clearTimeout(userStates.get(chatId).timeout); } catch (e) {} userStates.delete(chatId); } const timeout = setTimeout(() => { if (userStates.has(chatId)) { bot.sendMessage(chatId, '⏳ زمان پرسیدن سوال به پایان رسید. لطفاً دوباره تلاش کنید.'); cancelQuestionState(chatId); } }, 5 * 60 * 1000); userStates.set(chatId, { state: 'waiting_for_question', userId: from.id, username: from.username || 'بدون نام کاربری', timeout }); bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.'); }
+
+async function startFeedbackFlowFromDeepLink(chatId, qid) { const q = questions.find(x => String(x.id) === String(qid)); const username = ''; const fb = new Feedback({ questionId: Number(qid), questionText: q ? q.question : '', userChatId: chatId, userId: chatId, username, status: 'waiting_for_text' }); await fb.save(); const timeout = setTimeout(() => { if (userStates.has(chatId) && userStates.get(chatId).state === 'waiting_for_feedback') userStates.delete(chatId); }, 5 * 60 * 1000); userStates.set(chatId, { state: 'waiting_for_feedback', feedbackId: fb._id, timeout }); await bot.sendMessage(chatId, `لطفا متن بازخورد برای پست "${q ? q.question : ''}" را بنویسید. پس از ارسال، من آن را برای مدیریت می‌فرستم.`); }
+
+// --- Single message router ---
+async function handleMessage(msg) {
+  if (!msg) return;
+  const chatId = msg.chat && msg.chat.id;
+  const fromId = msg.from && String(msg.from.id);
+  const textRaw = (msg.text || '').trim();
+  const text = textRaw;
+
+  // 1) Admin proxy commands
+  const addProxyMatch = text.match(/^افزودن پروکسی \((.+)\)$/u);
+  if (addProxyMatch) { if (String(fromId) !== String(ADMIN_ID)) { await bot.sendMessage(chatId, 'شما اجازه انجام این کار را ندارید'); return; } const proxyUrl = addProxyMatch[1]; if (!validateSocks5Url(proxyUrl)) { await bot.sendMessage(chatId, 'فرمت پروکسی صحیح نیست'); return; } saveProxyToFile(proxyUrl); await bot.sendMessage(chatId, 'پروکسی با موفقیت ست شد'); await createBotWithProxy(proxyUrl); return; }
+
+  if (text === 'حذف پروکسی') { if (String(fromId) !== String(ADMIN_ID)) { await bot.sendMessage(chatId, 'شما اجازه انجام این کار را ندارید'); return; } deleteProxyFile(); await bot.sendMessage(chatId, 'پروکسی حذف شد'); await createBotWithProxy(null); return; }
+
+  // 2) Commands
+  if (text.startsWith('/')) {
+    const cmd = text.split(' ')[0].toLowerCase();
+    if (cmd === '/start') {
+      const m = text.match(/^\/start(?:\s+(.+))?/i);
+      const payload = m && m[1] ? m[1] : null;
+      if (!payload || !payload.startsWith('feedback_')) cancelQuestionState(chatId);
+      if (payload && payload.startsWith('feedback_')) { const qid = payload.split('_')[1]; const q = questions.find(x => String(x.id) === String(qid)); const fb = new Feedback({ questionId: Number(qid), questionText: q ? q.question : '', userChatId: msg.from.id, userId: msg.from.id, username: msg.from.username ? `@${msg.from.username}` : '', status: 'waiting_for_text' }); await fb.save(); const timeout = setTimeout(() => { if (userStates.has(chatId) && userStates.get(chatId).state === 'waiting_for_feedback') userStates.delete(chatId); }, 5 * 60 * 1000); userStates.set(chatId, { state: 'waiting_for_feedback', feedbackId: fb._id, timeout }); await bot.sendMessage(chatId, `لطفا متن بازخورد برای پست "${q ? q.question : ''}" را بنویسید. پس از ارسال، من آن را برای مدیریت می‌فرستم.`); return; }
+      // welcome message
+      let welcomeMessage = `🌟 خوش آمدید به ربات پاسخگوی سوالات اسلامی!\n\n🤖 این ربات به شما کمک می‌کند تا:\n- سوالات خود درباره اسلام را بپرسید\n- به پاسخ‌های موجود دسترسی داشته باشید\n- با مطالب آموزنده آشنا شوید\n\n📝 دستورات موجود:\n/start - شروع مجدد ربات\n/quickAnswer - مشاهده لیست تمام سوالات و پاسخ‌ها\n/question - پرسیدن سوال جدید\n/cancel - لغو عملیات فعلی\n\n🔍 نمونه سوالات رندوم:`;
+      let randomQuestions = [];
+      if (questions && questions.length > 0) { const shuffled = questions.slice().sort(() => 0.5 - Math.random()); randomQuestions = shuffled.slice(0, 3); }
+      let questionsMessage = '';
+      randomQuestions.forEach(q => { questionsMessage += `❓ <a href="https://t.me/questions_islam/${q.id}">${q.question}</a>\n`; });
+      const fullMessage = `${welcomeMessage}\n\n${questionsMessage || '❗️ نمونه سوال در حال حاضر موجود نیست.'}`;
+      const keyboard = { reply_markup: { inline_keyboard: [[{ text: 'سوالاتی که قبلا پاسخ داده شده', callback_data: 'show_quick_answer' }, { text: 'پرسیدن سوال جدید', callback_data: 'ask_new_question' }]] }, parse_mode: 'HTML', disable_web_page_preview: false };
+      await bot.sendMessage(chatId, fullMessage, keyboard);
+      return;
     }
+    if (cmd === '/quickanswer') { await sendQuickAnswerList(chatId); return; }
+    if (cmd === '/question') { startQuestionFlow(chatId, msg.from); return; }
+    if (cmd === '/cancel') { if (cancelQuestionState(chatId)) await bot.sendMessage(chatId, '❌ عملیات لغو شد.'); else await bot.sendMessage(chatId, '❗️ عملیاتی برای لغو کردن وجود ندارد.'); return; }
     return;
   }
 
-  if (text === "سلام") {
-    bot.sendMessage(chatId, " و علیکم سلام دوست اهل پرشیا من \n اگه سوالی داری /question رو بزن")
-    return;
-  }
+  // 3) greetings & profanity
+  if (text === 'سلام') { await bot.sendMessage(chatId, 'و علیکم سلام دوست اهل پرشیا من \n اگه سوالی داری /question رو بزن'); return; }
+  const badWords = ['کیر', 'کون', 'کص', 'کس', 'dick', 'sex', 'porn', 'pussy', 'ass'];
+  for (const w of badWords) { if (text.includes(w) || text === w) { await bot.sendMessage(chatId, 'لطفا از کلمات شرم آور استفاده نکنید\nبیایید محترمانه حرف بزنیم تا گفت وگو خوشایندتر بشه'); return; } }
 
-  if (
-    text.includes("کیر ") ||
-    text.includes("کون ") ||
-    text.includes("کص ") ||
-    text.includes("کس ") ||
-    text.includes("dick ") ||
-    text.includes("sex ") ||
-    text.includes("porn ") ||
-    text.includes("pussy ") ||
-    text.includes("ass ") ||
-    text === "کیر" ||
-    text === "کون" ||
-    text === "کص" ||
-    text === "کس" ||
-    text === "dick" ||
-    text === "sex" ||
-    text === "porn" ||
-    text === "pussy" ||
-    text === "ass"
-  ) {
-    bot.sendMessage(chatId, `
-      لطفا از کلمات شرم آور استفاده نکنید 
-      بیایید محترمانه حرف بزنیم تا گفت وگو خوشایندتر بشه 
-      `)
-    return;
-  }
-
-  // Check if message is from admin and block question receiving
-  if (chatId.toString() === adminId.toString()) {
-    return;
-  }
-
-  if (msg.sticker) console.log("sticker :", msg.sticker.file_id);
-
-  if (userStates.has(chatId)) {
-    const userState = userStates.get(chatId);
-
-    if (userState.state === 'waiting_for_feedback') {
-      const fbId = userState.feedbackId;
-      try {
+  // 4) admin reply-to-user
+  if (String(fromId) === String(ADMIN_ID) && msg.reply_to_message && msg.text) {
+    const original = msg.reply_to_message.text || '';
+    const feedbackMatch = original.match(/FeedbackID:([0-9a-fA-F]{24})/);
+    const textLower = msg.text.trim().toLowerCase();
+    if (feedbackMatch) {
+      const fbId = feedbackMatch[1];
+      if (textLower === 'پایان') {
         const fb = await Feedback.findById(fbId);
+        if (fb && fb.adminReplies && fb.adminReplies.length > 0) {
+          const previewText = (fb.userFeedback || '').split(' ').slice(0, 5).join(' ') + '...';
+          await bot.sendMessage(fb.userChatId, `پاسخ ادمین به بازخورد "${previewText}":`);
+          for (const r of fb.adminReplies) await bot.sendMessage(fb.userChatId, r);
+          await AnswerLog.create({ type: 'feedback', questionId: fb.questionId, questionText: fb.questionText, userChatId: fb.userChatId, userId: fb.userId, username: fb.username, userFeedback: fb.userFeedback, adminId: ADMIN_ID, adminAnswers: fb.adminReplies, createdAt: new Date() });
+          fb.status = 'completed'; fb.adminReplies = []; await fb.save();
+          await bot.sendMessage(ADMIN_ID, '✅ پاسخ‌ها به کاربر ارسال شد.');
+        } else { await bot.sendMessage(ADMIN_ID, '⚠️ هیچ پاسخی ثبت نشده است.'); }
+        return;
+      }
+      if (msg.text.length < 50) { await bot.sendMessage(ADMIN_ID, '❗️ پاسخ شما باید حداقل ۵۰ کاراکتر باشد. لطفاً پاسخ را با جزئیات بیشتری بنویسید.'); return; }
+      await Feedback.findByIdAndUpdate(fbId, { $push: { adminReplies: msg.text }, $set: { status: 'waiting_admin' } });
+      await bot.sendMessage(ADMIN_ID, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
+      return;
+    }
+
+    const chatIdMatch = original.match(/chatId:(\d+)/);
+    const questionMatch = original.match(/یک سؤال جدید از کاربر[\s\S]*?\n([\s\S]*?)\n\nchatId:/);
+    if (chatIdMatch) {
+      const targetChatId = Number(chatIdMatch[1]);
+      if (String(targetChatId) === String(ADMIN_ID)) return;
+      const bufferKey = msg.reply_to_message.message_id;
+      if (!global.adminQuestionReplyBuffer.has(bufferKey)) global.adminQuestionReplyBuffer.set(bufferKey, { replies: [], targetChatId, userQuestion: questionMatch ? questionMatch[1].trim() : '' });
+      const buffer = global.adminQuestionReplyBuffer.get(bufferKey);
+      if (textLower === 'پایان') {
+        if (!buffer) { await bot.sendMessage(ADMIN_ID, '⚠️ پاسخی برای این سوال یافت نشد.'); return; }
+        if (buffer.replies.length > 0) {
+          const previewText = buffer.userQuestion ? buffer.userQuestion.split(' ').slice(0,5).join(' ') + '...' : '';
+          await bot.sendMessage(buffer.targetChatId, `پاسخ ادمین به سوال "${previewText}":`);
+          for (const r of buffer.replies) await bot.sendMessage(buffer.targetChatId, r);
+          await AnswerLog.create({ type: 'question', userChatId: buffer.targetChatId, userQuestion: buffer.userQuestion, adminId: ADMIN_ID, adminAnswers: buffer.replies, createdAt: new Date() });
+          global.adminQuestionReplyBuffer.delete(bufferKey);
+          await bot.sendMessage(ADMIN_ID, '✅ پاسخ‌ها به کاربر ارسال شد.');
+        } else { await bot.sendMessage(ADMIN_ID, '⚠️ هیچ پاسخی ثبت نشده است.'); }
+        return;
+      }
+      if (msg.text.length < 50) { await bot.sendMessage(ADMIN_ID, '❗️ پاسخ شما باید حداقل ۵۰ کاراکتر باشد. لطفاً پاسخ را با جزئیات بیشتری بنویسید.'); return; }
+      buffer.replies.push(msg.text);
+      global.adminQuestionReplyBuffer.set(bufferKey, buffer);
+      await bot.sendMessage(ADMIN_ID, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
+      return;
+    }
+  }
+
+  // 5) user states
+  if (userStates.has(chatId)) {
+    const state = userStates.get(chatId);
+    if (state.state === 'waiting_for_feedback') {
+      try {
+        const fb = await Feedback.findById(state.feedbackId);
         if (fb) {
           fb.userFeedback = text;
           fb.status = 'waiting_admin';
           await fb.save();
-
           const adminMsg = `📩 بازخورد جدید از ${fb.username || ''} برای سوال:\n\n${fb.questionText}\n\nمتن بازخورد:\n${text}\n\nFeedbackID:${fb._id}\nchatId:${fb.userChatId}`;
-          await sendLongMessage(adminId, adminMsg);
+          await sendLongMessage(ADMIN_ID, adminMsg);
           await bot.sendMessage(chatId, '✅ بازخورد شما ثبت و برای مدیریت ارسال شد.');
         }
-      } catch (e) {
-        console.error('Error saving feedback:', e && e.message);
-      }
-      clearTimeout(userState.timeout);
+      } catch (e) { console.error('saving feedback error:', e && e.message ? e.message : e); }
+      try { clearTimeout(state.timeout); } catch (e) {}
       userStates.delete(chatId);
       return;
     }
-
-    if (userState.state === 'waiting_for_question') {
-      if (text.length < 50) {
-        await bot.sendMessage(chatId, '❗️ سوال شما باید حداقل ۵۰ کاراکتر باشد. لطفاً سوال خود را با جزئیات بیشتری بنویسید.');
-        return;
-      }
-      const usernameDisplay = userState.username && userState.username !== 'بدون نام کاربری' ? `@${userState.username}` : '';
-      // Do NOT include post link for /question flow
+    if (state.state === 'waiting_for_question') {
+      if (text.length < 50) { await bot.sendMessage(chatId, '❗️ سوال شما باید حداقل ۵۰ کاراکتر باشد. لطفاً سوال خود را با جزئیات بیشتری بنویسید.'); return; }
+      const usernameDisplay = state.username && state.username !== 'بدون نام کاربری' ? `@${state.username}` : '';
       const questionMessage = `📩 یک سؤال جدید از کاربر ${usernameDisplay}\n\n${text}\n\nchatId:${chatId}`;
-      const key = userState.username && userState.username !== 'بدون نام کاربری' ? userState.username : `id_${chatId}`;
-      userChats.set(key, chatId);
-      adminReplies.set(key, []);
-      await AnswerLog.create({
-        type: 'question',
-        userChatId: chatId,
-        userId: userState.userId,
-        username: userState.username,
-        userQuestion: text,
-        createdAt: new Date()
-      });
-      await bot.sendMessage(adminId, questionMessage);
-
+      await AnswerLog.create({ type: 'question', userChatId: chatId, userId: state.userId, username: state.username, userQuestion: text, createdAt: new Date() });
+      await bot.sendMessage(ADMIN_ID, questionMessage);
       await bot.sendMessage(chatId, '✅ سوال شما دریافت شد و به زودی پاسخ داده خواهد شد.');
-
-      cancelQuestionState(chatId);
-      return;
-    }
-  }
-
-  const validQuestionPhrases = [
-    'سوال دارم',
-    'یک تضاد پیدا کردم تو اسلام',
-    'یک مشکل پیدا کردم تو اسلام'
-  ];
-  if (validQuestionPhrases.includes(normalizedText)) {
-    // Start the same flow as /question
-    if (chatId.toString() === adminId.toString()) return;
-
-    // Clear any existing state for this chat
-    if (userStates.has(chatId)) {
-      clearTimeout(userStates.get(chatId).timeout);
+      try { clearTimeout(state.timeout); } catch (e) {}
       userStates.delete(chatId);
-    }
-
-    const userId = msg.from.id;
-    const username = msg.from.username || 'بدون نام کاربری';
-
-    const timeout = setTimeout(() => {
-      if (userStates.has(chatId)) {
-        bot.sendMessage(chatId, '⏳ زمان پرسیدن سوال به پایان رسید. لطفاً دوباره تلاش کنید.');
-        cancelQuestionState(chatId);
-      }
-    }, 5 * 60 * 1000); // 5 minutes
-
-    userStates.set(chatId, {
-      state: 'waiting_for_question',
-      userId,
-      username,
-      timeout
-    });
-
-    if (chatId.toString() !== adminId.toString()) {
-      bot.sendMessage(chatId, '📝 لطفاً سوال خود را بنویسید.\n\nبرای لغو از دستور /cancel استفاده کنید.');
-    }
-  } else {
-    if (chatId.toString() !== adminId.toString()) {
-      bot.sendMessage(
-        chatId,
-        'اگر می‌خواهید سوالی بپرسید، لطفاً از دستور /question استفاده کنید یا یکی از عبارات زیر را بنویسید:\n- سوال دارم\n- یک تضاد پیدا کردم تو اسلام\n- یک مشکل پیدا کردم تو اسلام'
-      );
-    }
-  }
-});
-
-bot.on('callback_query', async (callbackQuery) => {
-  const data = callbackQuery.data || '';
-  const fromId = callbackQuery.from.id;
-  const messageId = callbackQuery.message ? callbackQuery.message.message_id : null;
-
-  if (data.startsWith('feedback:')) {
-    const qid = data.split(':')[1];
-    const q = questions.find(x => String(x.id) === String(qid));
-    const user = callbackQuery.from;
-
-  const feedbackMsg = `📣 درخواست بازخورد از کاربر @${user.username || 'بدون نام کاربری'}:\n\nسوال: ${q ? q.question : 'نامشخص'}\nلینک پست: https://t.me/questions_islam/${qid}\n\nchatId:${callbackQuery.from.id}`;
-
-  await sendLongMessage(adminId, feedbackMsg);
-    await bot.answerCallbackQuery(callbackQuery.id, { text: 'بازخورد برای مدیریت ارسال شد.' });
-    return;
-  }
-});
-
-bot.on('message', async (msg) => {
-  if (msg.from.id.toString() !== adminId || !msg.reply_to_message) return;
-
-  const original = msg.reply_to_message.text || '';
-  const feedbackMatch = original.match(/FeedbackID:([0-9a-fA-F]{24})/);
-  const text = msg.text || '';
-  
-  // Check if this message is an admin reply to a user question
-  const isQuestionReply = original.match(/^📩 یک سؤال جدید از کاربر/);
-  
-  // If not a feedback or question reply, exit early
-  if (!feedbackMatch && !isQuestionReply) return;
-
-  if (feedbackMatch) {
-    const fbId = feedbackMatch[1];
-    if (text.trim().toLowerCase() === 'پایان') {
-      const fb = await Feedback.findById(fbId);
-      if (fb && fb.adminReplies && fb.adminReplies.length > 0) {
-        const previewText = (fb.userFeedback || '').split(' ').slice(0, 5).join(' ') + '...';
-        await bot.sendMessage(fb.userChatId, `پاسخ ادمین به بازخورد "${previewText}":`);
-        for (const r of fb.adminReplies) {
-          await bot.sendMessage(fb.userChatId, r);
-        }
-        await AnswerLog.create({
-          type: 'feedback',
-          questionId: fb.questionId,
-          questionText: fb.questionText,
-          userChatId: fb.userChatId,
-          userId: fb.userId,
-          username: fb.username,
-          userFeedback: fb.userFeedback,
-          adminId: adminId,
-          adminAnswers: fb.adminReplies,
-          createdAt: new Date()
-        });
-        fb.status = 'completed';
-        fb.adminReplies = [];
-        await fb.save();
-        await bot.sendMessage(adminId, '✅ پاسخ‌ها به کاربر ارسال شد.');
-      } else {
-        await bot.sendMessage(adminId, '⚠️ هیچ پاسخی ثبت نشده است.');
-      }
       return;
     }
-    if (text.length < 50) {
-      await bot.sendMessage(adminId, '❗️ پاسخ شما باید حداقل ۵۰ کاراکتر باشد. لطفاً پاسخ را با جزئیات بیشتری بنویسید.');
-      return;
-    }
-    await Feedback.findByIdAndUpdate(fbId, { $push: { adminReplies: text }, $set: { status: 'waiting_admin' } });
-    await bot.sendMessage(adminId, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
-    return;
   }
 
-  // Handle question replies from admin
-  const chatIdMatch = original.match(/chatId:(\d+)/);
-  const questionMatch = original.match(/یک سؤال جدید از کاربر.*\n+([\s\S]*?)\n+chatId:/);
-  if (!chatIdMatch) return;
-  
-  const targetChatId = Number(chatIdMatch[1]);
-  const userQuestionText = questionMatch ? questionMatch[1].trim() : '';
+  // 6) phrase triggers
+  const normalized = text;
+  const validQuestionPhrases = ['سوال دارم', 'یک تضاد پیدا کردم تو اسلام', 'یک مشکل پیدا کردم تو اسلام'];
+  if (validQuestionPhrases.includes(normalized)) { startQuestionFlow(chatId, msg.from); return; }
 
-  // Skip if somehow the target is admin (shouldn't happen)
-  if (targetChatId.toString() === adminId) return;
-
-  // Initialize or get the reply buffer for this question
-  if (!global.adminQuestionReplyBuffer) global.adminQuestionReplyBuffer = new Map();
-  const bufferKey = msg.reply_to_message.message_id;
-  if (!global.adminQuestionReplyBuffer.has(bufferKey)) {
-    global.adminQuestionReplyBuffer.set(bufferKey, {
-      replies: [],
-      targetChatId,
-      userQuestion: userQuestionText
-    });
+  if (String(fromId) !== String(ADMIN_ID)) {
+    await bot.sendMessage(chatId, 'اگر می‌خواهید سوالی بپرسید، لطفاً از دستور /question استفاده کنید یا یکی از عبارات زیر را بنویسید:\n- سوال دارم\n- یک تضاد پیدا کردم تو اسلام\n- یک مشکل پیدا کردم تو اسلام');
   }
+}
 
-  if (text.trim().toLowerCase() === 'پایان') {
-    const questionData = global.adminQuestionReplyBuffer.get(bufferKey);
-    if (!questionData) {
-      await bot.sendMessage(adminId, '⚠️ پاسخی برای این سوال یافت نشد.');
-      return;
-    }
-
-    const { replies, targetChatId, userQuestion } = questionData;
-
-    if (replies.length > 0) {
-      const previewText = userQuestion ? userQuestion.split(' ').slice(0, 5).join(' ') + '...' : '';
-      await bot.sendMessage(targetChatId, `پاسخ ادمین به سوال "${previewText}":`);
-      
-      // Send all replies to user
-      for (const r of replies) {
-        await bot.sendMessage(targetChatId, r);
-      }
-
-      // Log the answer
-      await AnswerLog.create({
-        type: 'question',
-        userChatId: targetChatId,
-        userQuestion: userQuestion,
-        adminId: adminId,
-        adminAnswers: replies,
-        createdAt: new Date()
-      });
-
-      // Clean up the buffer
-      global.adminQuestionReplyBuffer.delete(bufferKey);
-      await bot.sendMessage(adminId, '✅ پاسخ‌ها به کاربر ارسال شد.');
-    } else {
-      await bot.sendMessage(adminId, '⚠️ هیچ پاسخی ثبت نشده است.');
-    }
-    return;
-  }
-
-  // Store the reply in the buffer
-  if (text.length < 50) {
-    await bot.sendMessage(adminId, '❗️ پاسخ شما باید حداقل ۵۰ کاراکتر باشد. لطفاً پاسخ را با جزئیات بیشتری بنویسید.');
-    return;
-  }
-  const questionData = global.adminQuestionReplyBuffer.get(bufferKey);
-  questionData.replies.push(text);
-  global.adminQuestionReplyBuffer.set(bufferKey, questionData);
-  await bot.sendMessage(adminId, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
+// --- startup & shutdown ---
+mongoose.connect('mongodb://127.0.0.1:27017/questionIslamBot', { useNewUrlParser: true, useUnifiedTopology: true }).then(async () => {
+  console.log('Connected to MongoDB questionIslamBot');
+  await loadQuestions().catch(err => console.error('loadQuestions error:', err));
+  const startupProxy = loadProxyFromFile();
+  await createBotWithProxy(startupProxy);
+}).catch(err => {
+  console.error('MongoDB connect error:', err && err.message ? err.message : err);
+  loadQuestions().catch(() => {});
+  const startupProxy = loadProxyFromFile();
+  createBotWithProxy(startupProxy).catch(() => {});
 });
 
-} // end registerHandlers
+process.on('SIGINT', async () => {
+  console.log('SIGINT received — stopping bot');
+  try { if (bot) await bot.stopPolling(); } catch (e) {}
+  process.exit(0);
+});
 
-// On startup, load proxy.json (if present) and create bot accordingly
-const startupProxy = loadProxyFromFile();
-createBotWithProxy(startupProxy);
+module.exports = { createBotWithProxy, loadProxyFromFile, saveProxyToFile, deleteProxyFile };
