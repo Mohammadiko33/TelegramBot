@@ -434,4 +434,24 @@ module.exports = [
     question: "اسلام اوردن ایرانی ها با زور شمشیره",
     answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/who-create-worlds/response.html/iran-islam-sword/response.html",
   },
+  {
+    id: 130,
+    question: "قبله درست کدوم طرفه",
+    answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/where-is-the-Qiblah/response.html",
+  },
+  {
+    id: 131,
+    question: "صفت مسلمان آدم کشتن هست",
+    answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/muslims-are-Killers/response.html",
+  },
+  {
+    id: 132,
+    question: "قرآن الهی نیست از زبان محمد ص است دلیلش سوره حمد",
+    answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/quran-from-who/response.html",
+  },
+  {
+    id: 133,
+    question: "بهشت و جهنم فقط توهم آسمونی هستن",
+    answerSite: "https://mohammadiko33.github.io/new-islam-question/main/routes/all-Misery-from-Paradise/response.html",
+  },
 ];
