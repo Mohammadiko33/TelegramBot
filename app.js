@@ -25,7 +25,77 @@ const loadQuestions = async () => {
   }
 };
 
-const bot = new telegramBot(token, { polling: true });
+const fs = require('fs');
+const path = require('path');
+const { SocksProxyAgent } = require('socks-proxy-agent');
+const PROXY_FILE = path.join(__dirname, 'proxy.json');
+
+let bot = null;
+
+function saveProxyToFile(proxy) {
+  try {
+    fs.writeFileSync(PROXY_FILE, JSON.stringify({ proxy }, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Failed to save proxy file:', e && e.message ? e.message : e);
+  }
+}
+
+function deleteProxyFile() {
+  try {
+    if (fs.existsSync(PROXY_FILE)) fs.unlinkSync(PROXY_FILE);
+  } catch (e) {
+    console.error('Failed to delete proxy file:', e && e.message ? e.message : e);
+  }
+}
+
+function loadProxyFromFile() {
+  try {
+    if (!fs.existsSync(PROXY_FILE)) return null;
+    const raw = fs.readFileSync(PROXY_FILE, 'utf8');
+    const obj = JSON.parse(raw);
+    return obj && obj.proxy ? obj.proxy : null;
+  } catch (e) {
+    console.error('Failed to load proxy file:', e && e.message ? e.message : e);
+    return null;
+  }
+}
+
+async function createBotWithProxy(proxyUrl) {
+  try {
+    if (bot) {
+      try {
+        await bot.stopPolling();
+      } catch (e) {}
+      try {
+        bot.removeAllListeners && bot.removeAllListeners();
+      } catch (e) {}
+      bot = null;
+    }
+
+    const options = { polling: true };
+    if (proxyUrl) {
+      const agent = new SocksProxyAgent(proxyUrl);
+      options.request = { agent };
+    }
+
+    bot = new telegramBot(token, options);
+
+    // re-register handlers on the new bot instance
+    registerHandlers();
+
+    try {
+      const info = await bot.getMe();
+      botUsername = info.username || botUsername;
+      console.log('Bot username:', botUsername);
+    } catch (e) {
+      console.warn('Could not get bot username; deep links may not work until available.');
+    }
+
+    console.log('Bot started' + (proxyUrl ? ` with proxy ${proxyUrl}` : ' without proxy'));
+  } catch (e) {
+    console.error('Error creating bot with proxy:', e && e.message ? e.message : e);
+  }
+}
 
 // helper to send long messages in chunks (Telegram limit ~4096 chars)
 async function sendLongMessage(chatId, text, options = {}) {
@@ -47,14 +117,7 @@ async function sendLongMessage(chatId, text, options = {}) {
 }
 
 let botUsername = process.env.BOT_USERNAME || null;
-if (!botUsername) {
-  bot.getMe().then(info => {
-    botUsername = info.username;
-    console.log('Bot username:', botUsername);
-  }).catch(() => {
-    console.warn('Could not get bot username; deep links may not work until available.');
-  });
-} else {
+if (botUsername) {
   console.log('Using BOT_USERNAME from env:', botUsername);
 }
 
@@ -118,7 +181,47 @@ const cancelQuestionState = (chatId) => {
   return false;
 };
 
-bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
+function registerHandlers() {
+  // Admin proxy commands: add and remove proxy
+  bot.on('message', async (msg) => {
+    const text = msg.text || '';
+    if (!text) return;
+
+    // افزودن پروکسی (socks5://IP:PORT)
+    const addMatch = text.match(/^افزودن پروکسی \((socks5:\/\/[^"]+)\)$/u);
+    if (addMatch) {
+      // only admin
+      if (String(msg.from.id) !== String(adminId)) {
+        await bot.sendMessage(msg.chat.id, 'شما اجازه انجام این کار را ندارید');
+        return;
+      }
+      const proxyUrl = addMatch[1];
+      // basic format validation
+      if (!/^socks5:\/\/\d+\.\d+\.\d+\.\d+:\d+$/.test(proxyUrl)) {
+        await bot.sendMessage(msg.chat.id, 'فرمت پروکسی صحیح نیست');
+        return;
+      }
+      saveProxyToFile(proxyUrl);
+      await bot.sendMessage(msg.chat.id, 'پروکسی با موفقیت ست شد');
+      // restart bot with proxy
+      await createBotWithProxy(proxyUrl);
+      return;
+    }
+
+    // حذف پروکسی
+    if (text.trim() === 'حذف پروکسی') {
+      if (String(msg.from.id) !== String(adminId)) {
+        await bot.sendMessage(msg.chat.id, 'شما اجازه انجام این کار را ندارید');
+        return;
+      }
+      deleteProxyFile();
+      await bot.sendMessage(msg.chat.id, 'پروکسی حذف شد');
+      await createBotWithProxy(null);
+      return;
+    }
+  });
+
+  bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   const payload = match && match[1] ? match[1] : null;
   // If user sends /start (without feedback payload), cancel any pending question/feedback state
@@ -682,3 +785,9 @@ bot.on('message', async (msg) => {
   global.adminQuestionReplyBuffer.set(bufferKey, questionData);
   await bot.sendMessage(adminId, '✅ پاسخ ذخیره شد. برای ارسال به کاربر، لطفاً "پایان" را ارسال کنید.');
 });
+
+} // end registerHandlers
+
+// On startup, load proxy.json (if present) and create bot accordingly
+const startupProxy = loadProxyFromFile();
+createBotWithProxy(startupProxy);
